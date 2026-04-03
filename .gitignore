@@ -1,0 +1,43 @@
+# Build artifacts
+target/
+.anchor/
+**/*.rs.bk
+
+# Dependencies
+node_modules/
+.yarn/
+
+# Test
+test-ledger/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets and keys
+*.pem
+*.key
+*.p12
+.env
+.env.*
+!.env.example
+
+# Solana keypairs (NEVER commit private keys)
+*-keypair.json
+id.json
+*.keypair
+deploy-keypair*.json
+authority*.json
+wallet*.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
