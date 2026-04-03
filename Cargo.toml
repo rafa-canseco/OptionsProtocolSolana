@@ -4,6 +4,11 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+# Pin to resolve conflict: anchor-spl -> spl-token-2022 ->
+# solana-zk-sdk requires =2.2.1, anchor-lang resolves to 2.3.3
+solana-instruction = "=2.2.1"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"
