@@ -21,6 +21,7 @@ pub mod batch_settler {
 
     /// Instant settlement: user accepts a signed quote from MM.
     /// Collateral locked, oTokens minted, premium paid. One tx.
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_order(
         ctx: Context<ExecuteOrder>,
         _underlying: Pubkey,
@@ -31,23 +32,14 @@ pub mod batch_settler {
         _deadline: i64,
         _mm_signature: [u8; 64],
     ) -> Result<()> {
-        msg!(
-            "Order executed for {}",
-            ctx.accounts.buyer.key()
-        );
+        msg!("Order executed for {}", ctx.accounts.buyer.key());
         Ok(())
     }
 
     /// Expiry settlement: settle all vaults for an expired oToken.
     /// Called by the expiry settler bot at 08:00 UTC.
-    pub fn batch_settle_vaults(
-        ctx: Context<BatchSettle>,
-        _otoken: Pubkey,
-    ) -> Result<()> {
-        msg!(
-            "Batch settlement by {}",
-            ctx.accounts.settler.key()
-        );
+    pub fn batch_settle_vaults(ctx: Context<BatchSettle>, _otoken: Pubkey) -> Result<()> {
+        msg!("Batch settlement by {}", ctx.accounts.settler.key());
         Ok(())
     }
 
@@ -57,10 +49,7 @@ pub mod batch_settler {
         _otoken: Pubkey,
         _amount: u64,
     ) -> Result<()> {
-        msg!(
-            "Physical redeem by {}",
-            ctx.accounts.redeemer.key()
-        );
+        msg!("Physical redeem by {}", ctx.accounts.redeemer.key());
         Ok(())
     }
 }

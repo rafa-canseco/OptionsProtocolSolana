@@ -44,11 +44,7 @@ pub mod oracle {
         expiry_price.expiry = expiry;
         expiry_price.price = price;
         expiry_price.is_finalized = true;
-        msg!(
-            "Expiry price set: expiry={} price={}",
-            expiry,
-            price
-        );
+        msg!("Expiry price set: expiry={} price={}", expiry, price);
         Ok(())
     }
 }
