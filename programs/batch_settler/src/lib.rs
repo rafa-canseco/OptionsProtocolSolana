@@ -42,12 +42,14 @@ pub mod batch_settler {
     pub fn init_vault_counter(ctx: Context<InitVaultCounter>) -> Result<()> {
         let rent = Rent::get()?;
         let lamports = rent.minimum_balance(8 + 32 + 8 + 1);
+        // Pre-fund vault_counter PDA directly so Anchor's init
+        // skips transfer from settler PDA (which has data).
         anchor_lang::system_program::transfer(
             CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
                 anchor_lang::system_program::Transfer {
                     from: ctx.accounts.owner.to_account_info(),
-                    to: ctx.accounts.settler_config.to_account_info(),
+                    to: ctx.accounts.vault_counter.to_account_info(),
                 },
             ),
             lamports,
@@ -153,7 +155,7 @@ pub mod batch_settler {
             ctx.accounts.settler_config.protocol_fee_bps,
         )?;
 
-        fund_settler_rent(&ctx)?;
+        fund_vault_rent(&ctx)?;
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
@@ -669,16 +671,18 @@ fn verify_ed25519_signature(
     Ok(())
 }
 
-fn fund_settler_rent(ctx: &Context<ExecuteOrder>) -> Result<()> {
+fn fund_vault_rent(ctx: &Context<ExecuteOrder>) -> Result<()> {
     let rent = Rent::get()?;
     let vault_space = 8 + 32 + 8 + 32 + 8 + 32 + 8 + 1 + 1;
     let lamports = rent.minimum_balance(vault_space);
+    // Pre-fund vault PDA directly so Anchor's init skips
+    // transfer from settler PDA (which has data).
     anchor_lang::system_program::transfer(
         CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
             anchor_lang::system_program::Transfer {
                 from: ctx.accounts.buyer.to_account_info(),
-                to: ctx.accounts.settler_config.to_account_info(),
+                to: ctx.accounts.vault.to_account_info(),
             },
         ),
         lamports,
