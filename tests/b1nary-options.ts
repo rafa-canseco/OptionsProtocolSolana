@@ -724,12 +724,6 @@ describe("b1nary-options", () => {
     let poolVaultAuthPda: PublicKey;
     let ownerOtokenAccount: PublicKey;
 
-    // For settle/redeem tests: separate oToken with expiry=0
-    let settleOtokenMint: PublicKey;
-    let settleOtokenInfoPda: PublicKey;
-    let settleVaultPda: PublicKey;
-    let settleOwnerOtokenAccount: PublicKey;
-
     it("initializes controller config", async () => {
       await controllerProgram.methods
         .initialize(admin.publicKey)
@@ -1115,33 +1109,10 @@ describe("b1nary-options", () => {
       }
     });
 
-    it("settles vault after expiry (binary payout model)", async () => {
-      // For settle we need a vault with an expired oToken.
-      // Open a new vault (id=1), deposit, create an expired oTokenInfo,
-      // and manually set short_amount by minting with a trick:
-      // We can't mint through controller (expiry check). Instead we
-      // create the vault with an expired oToken and set values directly
-      // by doing the full flow with a just-barely-expired oToken.
-      //
-      // Simplest approach: create a new oTokenInfo with expiry=0,
-      // open vault, deposit, set short_amount by... actually we need
-      // the controller to set short_amount. Let's use a workaround:
-      //
-      // Use the future-expiry vault we already have. It has
-      // 100_000_000 short at $2000 strike. We can't settle it because
-      // it hasn't expired. So for settle tests, we need a different
-      // approach.
-      //
-      // The cleanest: open vault #1, deposit, use a new otoken with
-      // expiry=0, and set short_amount+otoken_mint via create_otoken_info
-      // then call settle. But the vault needs short_amount > 0 which
-      // only happens via mint_otoken...
-      //
-      // Real fix: we test settle via the batch_settler flow (which is
-      // the production path anyway). For the standalone controller test,
-      // test that settle REJECTS a non-expired vault.
-
-      // Test: reject settling a non-expired vault
+    it("rejects settling a non-expired vault", async () => {
+      // Can't test positive settle standalone: mint_otoken requires
+      // future expiry, but settle requires past expiry. Full settle
+      // flow is tested via batch_settler integration path.
       try {
         const tempBeneficiaryAcct = await createAccount(
           connection,
@@ -2435,6 +2406,117 @@ describe("b1nary-options", () => {
             quoteFillPda2
           );
         assert.equal(fill.filledAmount.toNumber(), 1_000_000);
+      });
+
+      it("emergency withdraw: rejects wrong beneficiary", async () => {
+        // Fully pause controller for emergency withdraw
+        await controllerProgram.methods
+          .setFullyPaused(true)
+          .accounts({ admin: admin.publicKey })
+          .rpc();
+
+        try {
+          // maker is NOT the vault beneficiary (user is)
+          await batchSettlerProgram.methods
+            .emergencyWithdraw()
+            .accounts({
+              settlerConfig: settlerConfigPda,
+              beneficiary: maker.publicKey,
+              controllerConfig: controllerConfigPda,
+              vault: vaultPda,
+              poolTokenAccount: poolTokenAccount,
+              beneficiaryTokenAccount: userCollateralAccount,
+              poolVaultAuthority: poolVaultAuthPda,
+              maker: maker.publicKey,
+              otokenMint: otokenMint,
+              settlerOtokenAccount: settlerOtokenAccount,
+              makerOtokenBalance: makerOTokenBalancePda,
+              controllerProgram: controllerProgram.programId,
+              tokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .signers([maker])
+            .rpc();
+          assert.fail("should reject wrong beneficiary");
+        } catch (err: any) {
+          if (err.message === "should reject wrong beneficiary")
+            throw err;
+          assert.ok(
+            err.toString().includes("nauthorized") ||
+              err.toString().includes("ConstraintRaw"),
+            "rejects wrong beneficiary"
+          );
+        }
+
+        // Unpause for remaining tests
+        await controllerProgram.methods
+          .setFullyPaused(false)
+          .accounts({ admin: admin.publicKey })
+          .rpc();
+      });
+
+      it("emergency withdraw: returns collateral to beneficiary", async () => {
+        // Fully pause controller
+        await controllerProgram.methods
+          .setFullyPaused(true)
+          .accounts({ admin: admin.publicKey })
+          .rpc();
+
+        // user (beneficiary) calls emergency_withdraw
+        await batchSettlerProgram.methods
+          .emergencyWithdraw()
+          .accounts({
+            settlerConfig: settlerConfigPda,
+            beneficiary: user.publicKey,
+            controllerConfig: controllerConfigPda,
+            vault: vaultPda,
+            poolTokenAccount: poolTokenAccount,
+            beneficiaryTokenAccount: userCollateralAccount,
+            poolVaultAuthority: poolVaultAuthPda,
+            maker: maker.publicKey,
+            otokenMint: otokenMint,
+            settlerOtokenAccount: settlerOtokenAccount,
+            makerOtokenBalance: makerOTokenBalancePda,
+            controllerProgram: controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([user])
+          .rpc();
+
+        // oTokens burned from settler custody
+        const settlerOt = await getAccount(
+          connection, settlerOtokenAccount
+        );
+        assert.equal(
+          Number(settlerOt.amount), 0,
+          "oTokens burned from custody"
+        );
+
+        // MM balance cleared
+        const mmBal =
+          await batchSettlerProgram.account.makerOTokenBalance.fetch(
+            makerOTokenBalancePda
+          );
+        assert.equal(
+          mmBal.balance.toNumber(), 0,
+          "MM balance cleared"
+        );
+
+        // Collateral returned to beneficiary (user)
+        const userColl = await getAccount(
+          connection, userCollateralAccount
+        );
+        assert.equal(
+          Number(userColl.amount), 20_000_000,
+          "collateral returned to beneficiary"
+        );
+
+        // Vault marked as settled
+        const vault =
+          await controllerProgram.account.vault.fetch(vaultPda);
+        assert.equal(
+          vault.settled, true,
+          "vault settled after emergency withdraw"
+        );
       });
 
       it("rejects order with stale nonce", async () => {

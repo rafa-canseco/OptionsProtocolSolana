@@ -27,7 +27,15 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn open_vault(ctx: Context<OpenVault>, collateral_mint: Pubkey, beneficiary: Pubkey) -> Result<()> {
+    pub fn open_vault(
+        ctx: Context<OpenVault>,
+        collateral_mint: Pubkey,
+        beneficiary: Pubkey,
+    ) -> Result<()> {
+        require!(
+            beneficiary != Pubkey::default(),
+            ControllerError::ZeroAddress
+        );
         let config = &ctx.accounts.config;
         require!(!config.fully_paused, ControllerError::SystemFullyPaused);
         require!(

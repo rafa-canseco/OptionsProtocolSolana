@@ -125,6 +125,7 @@ pub mod batch_settler {
         collateral_mint: Pubkey,
     ) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
+        require!(bid_price > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
 
         validate_maker(&ctx.accounts.maker_state, maker_nonce)?;
@@ -220,8 +221,8 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
-        // Burn oTokens from settler custody
-        let burn_amount = ctx.accounts.settler_otoken_account.amount;
+        // Burn only this MM's custodied oTokens, not entire account
+        let burn_amount = ctx.accounts.maker_otoken_balance.balance;
         if burn_amount > 0 {
             token::burn(
                 CpiContext::new_with_signer(
@@ -580,13 +581,21 @@ pub struct EmergencyWithdrawOrder<'info> {
     pub settler_config: Account<'info, SettlerConfig>,
 
     /// Vault beneficiary triggers the emergency withdrawal
+    #[account(
+        constraint = beneficiary.key() == vault.beneficiary
+            @ SettlerError::Unauthorized,
+    )]
     pub beneficiary: Signer<'info>,
 
     /// CHECK: Validated by controller CPI
     pub controller_config: AccountInfo<'info>,
-    /// CHECK: Validated by controller CPI
-    #[account(mut)]
-    pub vault: AccountInfo<'info>,
+    /// Deserialized to validate beneficiary matches signer
+    #[account(
+        mut,
+        constraint = vault.owner == settler_config.key()
+            @ SettlerError::Unauthorized,
+    )]
+    pub vault: Account<'info, controller::Vault>,
     #[account(mut)]
     pub pool_token_account: Account<'info, TokenAccount>,
     /// Beneficiary's token account (receives collateral)
@@ -595,6 +604,8 @@ pub struct EmergencyWithdrawOrder<'info> {
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
+    /// CHECK: MM whose custody balance is being cleared
+    pub maker: AccountInfo<'info>,
     /// oToken mint for burning
     #[account(mut)]
     pub otoken_mint: Account<'info, Mint>,
@@ -604,10 +615,21 @@ pub struct EmergencyWithdrawOrder<'info> {
         constraint = settler_otoken_account.owner
             == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
+        constraint = settler_otoken_account.mint
+            == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_otoken_account: Account<'info, TokenAccount>,
-    /// MM balance to clear
-    #[account(mut)]
+    /// MM balance to clear (validated via PDA seeds)
+    #[account(
+        mut,
+        seeds = [
+            b"mm_balance",
+            maker.key().as_ref(),
+            otoken_mint.key().as_ref(),
+        ],
+        bump = maker_otoken_balance.bump,
+    )]
     pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
 
     pub controller_program: Program<'info, ControllerProgram>,
@@ -805,12 +827,21 @@ fn verify_ed25519_signature(
     require!(ix.data.len() >= 16, SettlerError::InvalidEd25519Data);
     require!(ix.data[0] == 1, SettlerError::InvalidEd25519Data);
 
-    let pk_off =
-        u16::from_le_bytes(ix.data[6..8].try_into().unwrap()) as usize;
-    let msg_off =
-        u16::from_le_bytes(ix.data[10..12].try_into().unwrap()) as usize;
-    let msg_sz =
-        u16::from_le_bytes(ix.data[12..14].try_into().unwrap()) as usize;
+    let pk_off = u16::from_le_bytes(
+        ix.data[6..8]
+            .try_into()
+            .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
+    ) as usize;
+    let msg_off = u16::from_le_bytes(
+        ix.data[10..12]
+            .try_into()
+            .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
+    ) as usize;
+    let msg_sz = u16::from_le_bytes(
+        ix.data[12..14]
+            .try_into()
+            .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
+    ) as usize;
 
     require!(
         pk_off + 32 <= ix.data.len(),
