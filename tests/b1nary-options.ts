@@ -5,6 +5,10 @@ import {
   PublicKey,
   SystemProgram,
   LAMPORTS_PER_SOL,
+  Ed25519Program,
+  TransactionInstruction,
+  Transaction,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -13,12 +17,14 @@ import {
   mintTo,
   getAccount,
   getMint,
+  approve,
 } from "@solana/spl-token";
 import { assert } from "chai";
 import { AddressBook } from "../target/types/address_book";
 import { MarginPool } from "../target/types/margin_pool";
 import { Controller } from "../target/types/controller";
 import { OtokenFactory } from "../target/types/otoken_factory";
+import { BatchSettler } from "../target/types/batch_settler";
 
 const ZERO_PUBKEY = PublicKey.default;
 
@@ -158,6 +164,40 @@ function findOTokenMintPda(
   );
 }
 
+function findSettlerConfigPda(
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("settler_config")],
+    programId
+  );
+}
+
+function findMakerStatePda(
+  maker: PublicKey,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("maker"), maker.toBuffer()],
+    programId
+  );
+}
+
+function findQuoteFillPda(
+  maker: PublicKey,
+  quoteId: BN,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("quote_fill"),
+      maker.toBuffer(),
+      quoteId.toArrayLike(Buffer, "le", 8),
+    ],
+    programId
+  );
+}
+
 async function fundAccount(
   provider: anchor.AnchorProvider,
   pubkey: PublicKey,
@@ -185,6 +225,8 @@ describe("b1nary-options", () => {
     .controller as Program<Controller>;
   const otokenFactoryProgram = anchor.workspace
     .otokenFactory as Program<OtokenFactory>;
+  const batchSettlerProgram = anchor.workspace
+    .batchSettler as Program<BatchSettler>;
 
   const admin = provider.wallet as anchor.Wallet;
   const connection = provider.connection;
@@ -2017,6 +2059,824 @@ describe("b1nary-options", () => {
       );
       assert.equal(otoken.isPut, true, "is put");
       assert.ok(otoken.mint.toBuffer().length > 0, "has mint");
+    });
+  });
+
+  // ───────────────────────────────────────────
+  // BatchSettler tests
+  // ───────────────────────────────────────────
+  describe("batch_settler", () => {
+    const [settlerConfigPda] = findSettlerConfigPda(
+      batchSettlerProgram.programId
+    );
+
+    const operator = Keypair.generate();
+    const treasury = Keypair.generate();
+    const maker = Keypair.generate();
+    const buyer = Keypair.generate();
+    const feeBps = 500; // 5%
+
+    before(async () => {
+      // Fund test accounts
+      await fundAccount(
+        provider,
+        operator.publicKey,
+        5 * LAMPORTS_PER_SOL
+      );
+      await fundAccount(
+        provider,
+        maker.publicKey,
+        5 * LAMPORTS_PER_SOL
+      );
+      await fundAccount(
+        provider,
+        buyer.publicKey,
+        5 * LAMPORTS_PER_SOL
+      );
+      await fundAccount(
+        provider,
+        treasury.publicKey,
+        LAMPORTS_PER_SOL
+      );
+    });
+
+    it("initializes settler config", async () => {
+      await batchSettlerProgram.methods
+        .initialize(
+          operator.publicKey,
+          treasury.publicKey,
+          feeBps
+        )
+        .accounts({
+          payer: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.ok(
+        config.owner.equals(admin.publicKey),
+        "owner is admin"
+      );
+      assert.ok(
+        config.operator.equals(operator.publicKey),
+        "operator set"
+      );
+      assert.ok(
+        config.treasury.equals(treasury.publicKey),
+        "treasury set"
+      );
+      assert.equal(
+        config.protocolFeeBps,
+        feeBps,
+        "fee bps"
+      );
+      assert.equal(config.paused, false, "not paused");
+    });
+
+    it("rejects fee above 2000 bps", async () => {
+      try {
+        await batchSettlerProgram.methods
+          .setProtocolFee(2001)
+          .accounts({
+            owner: admin.publicKey,
+          })
+          .rpc();
+        assert.fail("should reject");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "FeeTooHigh"
+        );
+      }
+    });
+
+    it("whitelists a maker", async () => {
+      await batchSettlerProgram.methods
+        .whitelistMaker(maker.publicKey, true)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
+      const state =
+        await batchSettlerProgram.account.makerState.fetch(
+          makerStatePda
+        );
+      assert.ok(
+        state.maker.equals(maker.publicKey),
+        "maker set"
+      );
+      assert.equal(state.whitelisted, true, "whitelisted");
+      assert.equal(
+        state.nonce.toNumber(),
+        0,
+        "nonce starts at 0"
+      );
+    });
+
+    it("rejects non-owner whitelist", async () => {
+      try {
+        await batchSettlerProgram.methods
+          .whitelistMaker(maker.publicKey, false)
+          .accounts({
+            owner: buyer.publicKey,
+          })
+          .signers([buyer])
+          .rpc();
+        assert.fail("should reject");
+      } catch (err: any) {
+        assert.include(err.toString(), "ConstraintHasOne");
+      }
+    });
+
+    it("increments maker nonce", async () => {
+      await batchSettlerProgram.methods
+        .incrementMakerNonce()
+        .accounts({
+          maker: maker.publicKey,
+        })
+        .signers([maker])
+        .rpc();
+
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
+      const state =
+        await batchSettlerProgram.account.makerState.fetch(
+          makerStatePda
+        );
+      assert.equal(
+        state.nonce.toNumber(),
+        1,
+        "nonce incremented"
+      );
+    });
+
+    it("cancels a quote", async () => {
+      const quoteId = new BN(42);
+      await batchSettlerProgram.methods
+        .cancelQuote(quoteId)
+        .accounts({
+          maker: maker.publicKey,
+        })
+        .signers([maker])
+        .rpc();
+
+      const [quoteFillPda] = findQuoteFillPda(
+        maker.publicKey,
+        quoteId,
+        batchSettlerProgram.programId
+      );
+      const fill =
+        await batchSettlerProgram.account.quoteFill.fetch(
+          quoteFillPda
+        );
+      assert.equal(fill.cancelled, true, "quote cancelled");
+      assert.equal(
+        fill.filledAmount.toNumber(),
+        0,
+        "no fills"
+      );
+    });
+
+    it("rejects double cancellation", async () => {
+      const quoteId = new BN(42);
+      try {
+        await batchSettlerProgram.methods
+          .cancelQuote(quoteId)
+          .accounts({
+            maker: maker.publicKey,
+          })
+          .signers([maker])
+          .rpc();
+        assert.fail("should reject double cancel");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "QuoteAlreadyCancelled"
+        );
+      }
+    });
+
+    it("updates treasury", async () => {
+      const newTreasury = Keypair.generate().publicKey;
+      await batchSettlerProgram.methods
+        .setTreasury(newTreasury)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.ok(
+        config.treasury.equals(newTreasury),
+        "treasury updated"
+      );
+
+      // Restore original treasury for later tests
+      await batchSettlerProgram.methods
+        .setTreasury(treasury.publicKey)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    it("updates protocol fee", async () => {
+      await batchSettlerProgram.methods
+        .setProtocolFee(1000)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.equal(
+        config.protocolFeeBps,
+        1000,
+        "fee updated to 10%"
+      );
+
+      // Restore original fee
+      await batchSettlerProgram.methods
+        .setProtocolFee(feeBps)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    it("pauses and unpauses", async () => {
+      await batchSettlerProgram.methods
+        .pause(true)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      let config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.equal(config.paused, true, "paused");
+
+      await batchSettlerProgram.methods
+        .pause(false)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.equal(config.paused, false, "unpaused");
+    });
+
+    it("updates operator", async () => {
+      const newOp = Keypair.generate().publicKey;
+      await batchSettlerProgram.methods
+        .setOperator(newOp)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.ok(
+        config.operator.equals(newOp),
+        "operator updated"
+      );
+
+      // Restore
+      await batchSettlerProgram.methods
+        .setOperator(operator.publicKey)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    it("de-whitelists a maker", async () => {
+      await batchSettlerProgram.methods
+        .whitelistMaker(maker.publicKey, false)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
+      const state =
+        await batchSettlerProgram.account.makerState.fetch(
+          makerStatePda
+        );
+      assert.equal(
+        state.whitelisted,
+        false,
+        "de-whitelisted"
+      );
+
+      // Re-whitelist for future tests
+      await batchSettlerProgram.methods
+        .whitelistMaker(maker.publicKey, true)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    describe("execute_order flow", () => {
+      let collateralMint: PublicKey;
+      let premiumMint: PublicKey;
+      let otokenMint: PublicKey;
+      let otokenInfoPda: PublicKey;
+      let poolTokenAccount: PublicKey;
+      let poolVaultAuthPda: PublicKey;
+      let mmCollateralAccount: PublicKey;
+      let buyerOtokenAccount: PublicKey;
+      let buyerPremiumAccount: PublicKey;
+      let mmPremiumAccount: PublicKey;
+      let treasuryPremiumAccount: PublicKey;
+      let vaultCounterForSettler: PublicKey;
+      let vaultPda: PublicKey;
+
+      const [controllerConfigPda] = findControllerConfigPda(
+        controllerProgram.programId
+      );
+      const strikePrice = new BN("200000000000"); // $2000
+      const underlying = Keypair.generate().publicKey;
+      const strikeAsset = Keypair.generate().publicKey;
+
+      // Order params
+      const orderAmount = new BN(1_000_000);
+      const bidPrice = new BN(100_000_000); // 1.0 in PRICE_SCALE
+      const deadline = new BN(9_999_999_999);
+      const quoteId = new BN(100);
+      const maxAmount = new BN(10_000_000);
+      const makerNonce = new BN(1); // after increment
+      const collateralAmount = new BN(20_000_000);
+
+      function buildQuoteMessage(
+        mint: PublicKey,
+        price: BN,
+        dl: BN,
+        qid: BN,
+        maxAmt: BN,
+        nonce: BN
+      ): Buffer {
+        const msg = Buffer.alloc(72);
+        mint.toBuffer().copy(msg, 0);
+        msg.writeBigUInt64LE(BigInt(price.toString()), 32);
+        msg.writeBigInt64LE(BigInt(dl.toString()), 40);
+        msg.writeBigUInt64LE(BigInt(qid.toString()), 48);
+        msg.writeBigUInt64LE(BigInt(maxAmt.toString()), 56);
+        msg.writeBigUInt64LE(BigInt(nonce.toString()), 64);
+        return msg;
+      }
+
+      before(async () => {
+        // Create collateral mint (6 decimals)
+        collateralMint = await createMint(
+          connection, admin.payer,
+          admin.publicKey, null, 6
+        );
+
+        // Create premium mint (6 decimals)
+        premiumMint = await createMint(
+          connection, admin.payer,
+          admin.publicKey, null, 6
+        );
+
+        // oToken mint: controller config PDA as authority
+        const otokenMintKp = Keypair.generate();
+        otokenMint = await createMint(
+          connection, admin.payer,
+          controllerConfigPda, null, 8, otokenMintKp
+        );
+
+        // OTokenInfo in controller (put, strike=$2000, expiry=0)
+        [otokenInfoPda] = findOTokenInfoPda(
+          otokenMint, controllerProgram.programId
+        );
+        await controllerProgram.methods
+          .createOtokenInfo(
+            otokenMint, underlying, strikeAsset,
+            collateralMint, strikePrice,
+            new BN(0), true, 6
+          )
+          .accounts({
+            config: controllerConfigPda,
+            otokenInfo: otokenInfoPda,
+            otokenMint: otokenMint,
+            admin: admin.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
+        // Pool vault auth PDA + pool token account
+        [poolVaultAuthPda] = PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("pool_vault_auth"),
+            collateralMint.toBuffer(),
+          ],
+          controllerProgram.programId
+        );
+        poolTokenAccount = await createAccount(
+          connection, admin.payer, collateralMint,
+          poolVaultAuthPda, Keypair.generate()
+        );
+
+        // MM collateral: owned by maker, mint 20k, delegate to settler
+        mmCollateralAccount = await createAccount(
+          connection, admin.payer, collateralMint,
+          maker.publicKey, Keypair.generate()
+        );
+        await mintTo(
+          connection, admin.payer, collateralMint,
+          mmCollateralAccount, admin.publicKey, 20_000_000
+        );
+        await approve(
+          connection, admin.payer, mmCollateralAccount,
+          settlerConfigPda, maker, 20_000_000
+        );
+
+        // Buyer oToken account
+        buyerOtokenAccount = await createAccount(
+          connection, admin.payer, otokenMint,
+          buyer.publicKey, Keypair.generate()
+        );
+
+        // Buyer premium account + mint 1M
+        buyerPremiumAccount = await createAccount(
+          connection, admin.payer, premiumMint,
+          buyer.publicKey, Keypair.generate()
+        );
+        await mintTo(
+          connection, admin.payer, premiumMint,
+          buyerPremiumAccount, admin.publicKey, 1_000_000
+        );
+
+        // MM premium account
+        mmPremiumAccount = await createAccount(
+          connection, admin.payer, premiumMint,
+          maker.publicKey, Keypair.generate()
+        );
+
+        // Treasury premium account
+        treasuryPremiumAccount = await createAccount(
+          connection, admin.payer, premiumMint,
+          treasury.publicKey, Keypair.generate()
+        );
+
+        // Init vault counter for settler PDA
+        [vaultCounterForSettler] = findVaultCounterPda(
+          settlerConfigPda, controllerProgram.programId
+        );
+        await batchSettlerProgram.methods
+          .initVaultCounter()
+          .accounts({
+            settlerConfig: settlerConfigPda,
+            owner: admin.publicKey,
+            vaultCounter: vaultCounterForSettler,
+            controllerProgram: controllerProgram.programId,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
+        // Vault PDA (vault_id = 0 for settler PDA)
+        [vaultPda] = findVaultPda(
+          settlerConfigPda, new BN(0),
+          controllerProgram.programId
+        );
+      });
+
+      it("executes full order: ed25519 sig, CPI chain, fee math", async () => {
+        const message = buildQuoteMessage(
+          otokenMint, bidPrice, deadline,
+          quoteId, maxAmount, makerNonce
+        );
+
+        // Ed25519 verify instruction (index 0 in tx)
+        const ed25519Ix =
+          Ed25519Program.createInstructionWithPrivateKey({
+            privateKey: maker.secretKey,
+            message: message,
+          });
+
+        const [quoteFillPda] = findQuoteFillPda(
+          maker.publicKey, quoteId,
+          batchSettlerProgram.programId
+        );
+        const [makerStatePda] = findMakerStatePda(
+          maker.publicKey, batchSettlerProgram.programId
+        );
+
+        const executeOrderIx =
+          await batchSettlerProgram.methods
+            .executeOrder(
+              orderAmount, bidPrice, deadline,
+              quoteId, maxAmount, makerNonce,
+              collateralAmount, collateralMint
+            )
+            .accounts({
+              settlerConfig: settlerConfigPda,
+              makerState: makerStatePda,
+              quoteFill: quoteFillPda,
+              controllerConfig: controllerConfigPda,
+              vault: vaultPda,
+              vaultCounter: vaultCounterForSettler,
+              otokenInfo: otokenInfoPda,
+              otokenMint: otokenMint,
+              mmCollateralAccount: mmCollateralAccount,
+              poolTokenAccount: poolTokenAccount,
+              buyerOtokenAccount: buyerOtokenAccount,
+              buyerPremiumAccount: buyerPremiumAccount,
+              mmPremiumAccount: mmPremiumAccount,
+              treasuryAccount: treasuryPremiumAccount,
+              buyer: buyer.publicKey,
+              maker: maker.publicKey,
+              controllerProgram:
+                controllerProgram.programId,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+              instructionsSysvar:
+                SYSVAR_INSTRUCTIONS_PUBKEY,
+            })
+            .instruction();
+
+        const tx = new Transaction()
+          .add(ed25519Ix)
+          .add(executeOrderIx);
+        const { blockhash, lastValidBlockHeight } =
+          await connection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = buyer.publicKey;
+        tx.sign(buyer);
+
+        const sig = await connection.sendRawTransaction(
+          tx.serialize()
+        );
+        await connection.confirmTransaction(
+          { signature: sig, blockhash, lastValidBlockHeight }
+        );
+
+        // Verify vault created via CPI
+        const vault =
+          await controllerProgram.account.vault.fetch(
+            vaultPda
+          );
+        assert.ok(
+          vault.owner.equals(settlerConfigPda),
+          "vault owner is settler PDA"
+        );
+        assert.equal(
+          vault.collateralAmount.toNumber(),
+          20_000_000,
+          "collateral deposited"
+        );
+        assert.equal(
+          vault.shortAmount.toNumber(),
+          1_000_000,
+          "oTokens minted (short amount)"
+        );
+
+        // Verify collateral flow
+        const poolAcct = await getAccount(
+          connection, poolTokenAccount
+        );
+        assert.equal(
+          Number(poolAcct.amount), 20_000_000,
+          "pool received collateral"
+        );
+        const mmCollAcct = await getAccount(
+          connection, mmCollateralAccount
+        );
+        assert.equal(
+          Number(mmCollAcct.amount), 0,
+          "MM collateral fully transferred"
+        );
+
+        // Verify oTokens minted to buyer
+        const buyerOt = await getAccount(
+          connection, buyerOtokenAccount
+        );
+        assert.equal(
+          Number(buyerOt.amount), 1_000_000,
+          "buyer received oTokens"
+        );
+
+        // Verify premium split (fee math):
+        // premium = 1_000_000 * 100_000_000 / 10^8 = 1_000_000
+        // fee = 1_000_000 * 500 / 10_000 = 50_000 (5%)
+        // net = 1_000_000 - 50_000 = 950_000
+        const buyerPrem = await getAccount(
+          connection, buyerPremiumAccount
+        );
+        assert.equal(
+          Number(buyerPrem.amount), 0,
+          "buyer paid full premium"
+        );
+        const mmPrem = await getAccount(
+          connection, mmPremiumAccount
+        );
+        assert.equal(
+          Number(mmPrem.amount), 950_000,
+          "MM received net premium"
+        );
+        const treasuryPrem = await getAccount(
+          connection, treasuryPremiumAccount
+        );
+        assert.equal(
+          Number(treasuryPrem.amount), 50_000,
+          "treasury received 5% fee"
+        );
+
+        // Verify quote fill tracking
+        const fill =
+          await batchSettlerProgram.account.quoteFill.fetch(
+            quoteFillPda
+          );
+        assert.equal(
+          fill.filledAmount.toNumber(), 1_000_000,
+          "fill amount recorded"
+        );
+      });
+
+      it("rejects order with stale nonce", async () => {
+        // Increment nonce from 1 to 2
+        await batchSettlerProgram.methods
+          .incrementMakerNonce()
+          .accounts({ maker: maker.publicKey })
+          .signers([maker])
+          .rpc();
+
+        // Sign quote with old nonce (1)
+        const staleNonce = new BN(1);
+        const newQuoteId = new BN(200);
+        const message = buildQuoteMessage(
+          otokenMint, bidPrice, deadline,
+          newQuoteId, maxAmount, staleNonce
+        );
+
+        const ed25519Ix =
+          Ed25519Program.createInstructionWithPrivateKey({
+            privateKey: maker.secretKey,
+            message: message,
+          });
+
+        const [quoteFillPda] = findQuoteFillPda(
+          maker.publicKey, newQuoteId,
+          batchSettlerProgram.programId
+        );
+        const [makerStatePda] = findMakerStatePda(
+          maker.publicKey, batchSettlerProgram.programId
+        );
+        const [newVaultPda] = findVaultPda(
+          settlerConfigPda, new BN(1),
+          controllerProgram.programId
+        );
+
+        const executeOrderIx =
+          await batchSettlerProgram.methods
+            .executeOrder(
+              orderAmount, bidPrice, deadline,
+              newQuoteId, maxAmount, staleNonce,
+              collateralAmount, collateralMint
+            )
+            .accounts({
+              settlerConfig: settlerConfigPda,
+              makerState: makerStatePda,
+              quoteFill: quoteFillPda,
+              controllerConfig: controllerConfigPda,
+              vault: newVaultPda,
+              vaultCounter: vaultCounterForSettler,
+              otokenInfo: otokenInfoPda,
+              otokenMint: otokenMint,
+              mmCollateralAccount: mmCollateralAccount,
+              poolTokenAccount: poolTokenAccount,
+              buyerOtokenAccount: buyerOtokenAccount,
+              buyerPremiumAccount: buyerPremiumAccount,
+              mmPremiumAccount: mmPremiumAccount,
+              treasuryAccount: treasuryPremiumAccount,
+              buyer: buyer.publicKey,
+              maker: maker.publicKey,
+              controllerProgram:
+                controllerProgram.programId,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: SystemProgram.programId,
+              instructionsSysvar:
+                SYSVAR_INSTRUCTIONS_PUBKEY,
+            })
+            .instruction();
+
+        const tx = new Transaction()
+          .add(ed25519Ix)
+          .add(executeOrderIx);
+        const { blockhash } =
+          await connection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.feePayer = buyer.publicKey;
+        tx.sign(buyer);
+
+        try {
+          await connection.sendRawTransaction(
+            tx.serialize()
+          );
+          assert.fail("should reject stale nonce");
+        } catch (err: any) {
+          if (err.message === "should reject stale nonce")
+            throw err;
+          const logs = (err.logs || []).join("\n");
+          assert.ok(
+            logs.includes("InvalidNonce") ||
+              err.message.includes("0x1774"),
+            "rejects with InvalidNonce"
+          );
+        }
+      });
+
+      it("settles vault via operator (batchSettleVaults)", async () => {
+        // Set expiry price: $1800 (put is ITM)
+        await controllerProgram.methods
+          .setExpiryPrice(new BN("180000000000"))
+          .accounts({
+            config: controllerConfigPda,
+            otokenInfo: otokenInfoPda,
+            admin: admin.publicKey,
+          })
+          .rpc();
+
+        const settlerCollateralAcct = await createAccount(
+          connection, admin.payer, collateralMint,
+          admin.publicKey, Keypair.generate()
+        );
+
+        await batchSettlerProgram.methods
+          .settleVault()
+          .accounts({
+            settlerConfig: settlerConfigPda,
+            operator: operator.publicKey,
+            controllerConfig: controllerConfigPda,
+            vault: vaultPda,
+            otokenInfo: otokenInfoPda,
+            poolTokenAccount: poolTokenAccount,
+            settlerCollateralAccount:
+              settlerCollateralAcct,
+            poolVaultAuthority: poolVaultAuthPda,
+            controllerAdmin: admin.publicKey,
+            controllerProgram:
+              controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([operator])
+          .rpc();
+
+        // Verify vault settled
+        const vault =
+          await controllerProgram.account.vault.fetch(
+            vaultPda
+          );
+        assert.equal(vault.settled, true, "vault settled");
+
+        // Payout = 1M * (200B - 180B) / 10^10 = 2_000_000
+        // Returned = 20_000_000 - 2_000_000 = 18_000_000
+        const settlerAcct = await getAccount(
+          connection, settlerCollateralAcct
+        );
+        assert.equal(
+          Number(settlerAcct.amount), 18_000_000,
+          "collateral returned to settler"
+        );
+
+        const poolAcct = await getAccount(
+          connection, poolTokenAccount
+        );
+        assert.equal(
+          Number(poolAcct.amount), 2_000_000,
+          "payout reserved for redemption"
+        );
+      });
     });
   });
 });
