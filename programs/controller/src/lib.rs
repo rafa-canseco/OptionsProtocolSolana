@@ -349,9 +349,7 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn emergency_withdraw_vault(
-        ctx: Context<EmergencyWithdrawVault>,
-    ) -> Result<()> {
+    pub fn emergency_withdraw_vault(ctx: Context<EmergencyWithdrawVault>) -> Result<()> {
         let config = &ctx.accounts.config;
         require!(config.fully_paused, ControllerError::NotFullyPaused);
 
@@ -380,14 +378,8 @@ pub mod controller {
                     ctx.accounts.token_program.to_account_info(),
                     anchor_spl::token::Transfer {
                         from: ctx.accounts.pool_token_account.to_account_info(),
-                        to: ctx
-                            .accounts
-                            .beneficiary_token_account
-                            .to_account_info(),
-                        authority: ctx
-                            .accounts
-                            .pool_vault_authority
-                            .to_account_info(),
+                        to: ctx.accounts.beneficiary_token_account.to_account_info(),
+                        authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
                 ),
@@ -828,6 +820,16 @@ pub struct CreateOTokenInfo<'info> {
     pub otoken_info: Account<'info, OTokenInfo>,
     /// CHECK: oToken mint address used as PDA seed
     pub otoken_mint: AccountInfo<'info>,
+    /// Whitelist entry proves this oToken is approved.
+    #[account(
+        seeds = [b"whitelisted_otoken", otoken_mint.key().as_ref()],
+        bump = whitelisted_otoken.bump,
+        seeds::program = whitelist_program.key(),
+        constraint = whitelisted_otoken.active
+            @ ControllerError::OTokenNotWhitelisted,
+    )]
+    pub whitelisted_otoken: Account<'info, whitelist::WhitelistedOToken>,
+    pub whitelist_program: Program<'info, whitelist::program::Whitelist>,
     #[account(mut)]
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -1026,4 +1028,6 @@ pub enum ControllerError {
     OptionExpired,
     #[msg("System not fully paused")]
     NotFullyPaused,
+    #[msg("OToken not whitelisted")]
+    OTokenNotWhitelisted,
 }

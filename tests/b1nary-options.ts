@@ -7,6 +7,8 @@ import {
   LAMPORTS_PER_SOL,
   Ed25519Program,
   Transaction,
+  TransactionMessage,
+  VersionedTransaction,
   SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import {
@@ -24,6 +26,7 @@ import { MarginPool } from "../target/types/margin_pool";
 import { Controller } from "../target/types/controller";
 import { OtokenFactory } from "../target/types/otoken_factory";
 import { BatchSettler } from "../target/types/batch_settler";
+import { Whitelist } from "../target/types/whitelist";
 
 const ZERO_PUBKEY = PublicKey.default;
 
@@ -196,6 +199,35 @@ function findQuoteFillPda(
   );
 }
 
+function findWhitelistConfigPda(
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("whitelist_config")],
+    programId
+  );
+}
+
+function findWhitelistedOTokenPda(
+  otokenMint: PublicKey,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("whitelisted_otoken"), otokenMint.toBuffer()],
+    programId
+  );
+}
+
+function findVaultMMPda(
+  vault: PublicKey,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("vault_mm"), vault.toBuffer()],
+    programId
+  );
+}
+
 function findMakerOTokenBalancePda(
   maker: PublicKey,
   otokenMint: PublicKey,
@@ -243,6 +275,8 @@ describe("b1nary-options", () => {
     .otokenFactory as Program<OtokenFactory>;
   const batchSettlerProgram = anchor.workspace
     .batchSettler as Program<BatchSettler>;
+  const whitelistProgram = anchor.workspace
+    .whitelist as Program<Whitelist>;
 
   const admin = provider.wallet as anchor.Wallet;
   const connection = provider.connection;
@@ -713,6 +747,9 @@ describe("b1nary-options", () => {
     const [configPda] = findControllerConfigPda(
       controllerProgram.programId
     );
+    const [whitelistConfigPda] = findWhitelistConfigPda(
+      whitelistProgram.programId
+    );
 
     let collateralMint: PublicKey;
     let otokenMint: PublicKey;
@@ -723,6 +760,30 @@ describe("b1nary-options", () => {
     let poolTokenAccount: PublicKey;
     let poolVaultAuthPda: PublicKey;
     let ownerOtokenAccount: PublicKey;
+
+    // Helper: whitelist an oToken so controller accepts it
+    async function whitelistOToken(mint: PublicKey) {
+      const [wlPda] = findWhitelistedOTokenPda(
+        mint, whitelistProgram.programId
+      );
+      await whitelistProgram.methods
+        .whitelistOtoken(mint)
+        .accounts({
+          whitelistedOtoken: wlPda,
+          config: whitelistConfigPda,
+          caller: admin.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+      return wlPda;
+    }
+
+    it("initializes whitelist", async () => {
+      await whitelistProgram.methods
+        .initialize(admin.publicKey)
+        .accounts({ payer: admin.publicKey })
+        .rpc();
+    });
 
     it("initializes controller config", async () => {
       await controllerProgram.methods
@@ -956,6 +1017,9 @@ describe("b1nary-options", () => {
         controllerProgram.programId
       );
 
+      // Whitelist the oToken before creating info
+      const wlPda = await whitelistOToken(otokenMint);
+
       // Put option, strike=$2000, far future expiry, 6 decimals
       await controllerProgram.methods
         .createOtokenInfo(
@@ -972,6 +1036,8 @@ describe("b1nary-options", () => {
           config: configPda,
           otokenInfo: otokenInfoPda,
           otokenMint: otokenMint,
+          whitelistedOtoken: wlPda,
+          whitelistProgram: whitelistProgram.programId,
           admin: admin.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -990,6 +1056,8 @@ describe("b1nary-options", () => {
           otokenInfo: otokenInfoPda,
           otokenMint: otokenMint,
           destination: ownerOtokenAccount,
+          whitelistedOtoken: wlPda,
+          whitelistProgram: whitelistProgram.programId,
           owner: admin.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
@@ -1034,6 +1102,8 @@ describe("b1nary-options", () => {
         controllerProgram.programId
       );
 
+      const expiredWlPda = await whitelistOToken(expiredMint);
+
       await controllerProgram.methods
         .createOtokenInfo(
           expiredMint,
@@ -1049,6 +1119,8 @@ describe("b1nary-options", () => {
           config: configPda,
           otokenInfo: expiredInfoPda,
           otokenMint: expiredMint,
+          whitelistedOtoken: expiredWlPda,
+          whitelistProgram: whitelistProgram.programId,
           admin: admin.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -1087,6 +1159,9 @@ describe("b1nary-options", () => {
     it("rejects minting with insufficient collateral", async () => {
       // 5B collateral. Each oToken needs 2B.
       // Already minted 1 (=2B used). Trying 4 more = 5 total = 10B > 5B
+      const [wlPda] = findWhitelistedOTokenPda(
+        otokenMint, whitelistProgram.programId
+      );
       try {
         await controllerProgram.methods
           .mintOtoken(new BN(400_000_000))
@@ -1856,11 +1931,15 @@ describe("b1nary-options", () => {
     });
 
     it("initializes settler config", async () => {
+      const jupiterProgram = Keypair.generate().publicKey;
+      const escapeDelay = new BN(259200); // 3 days
       await batchSettlerProgram.methods
         .initialize(
           operator.publicKey,
           treasury.publicKey,
-          feeBps
+          feeBps,
+          escapeDelay,
+          jupiterProgram
         )
         .accounts({
           payer: admin.publicKey,
@@ -2164,6 +2243,24 @@ describe("b1nary-options", () => {
         [otokenInfoPda] = findOTokenInfoPda(
           otokenMint, controllerProgram.programId
         );
+
+        // Whitelist the oToken BEFORE createOtokenInfo (enforced on-chain)
+        const [wlConfigPda] = findWhitelistConfigPda(
+          whitelistProgram.programId
+        );
+        const [wlOtokenPda] = findWhitelistedOTokenPda(
+          otokenMint, whitelistProgram.programId
+        );
+        await whitelistProgram.methods
+          .whitelistOtoken(otokenMint)
+          .accounts({
+            whitelistedOtoken: wlOtokenPda,
+            config: wlConfigPda,
+            caller: admin.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+
         await controllerProgram.methods
           .createOtokenInfo(
             otokenMint, underlying, strikeAsset,
@@ -2174,6 +2271,8 @@ describe("b1nary-options", () => {
             config: controllerConfigPda,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            whitelistedOtoken: wlOtokenPda,
+            whitelistProgram: whitelistProgram.programId,
             admin: admin.publicKey,
             systemProgram: SystemProgram.programId,
           })
@@ -2309,6 +2408,9 @@ describe("b1nary-options", () => {
               userPremiumAccount: userPremiumAccount,
               treasuryAccount: treasuryPremiumAccount,
               makerOtokenBalance: makerOTokenBalancePda,
+              vaultMm: findVaultMMPda(
+                vaultPda, batchSettlerProgram.programId
+              )[0],
               user: user.publicKey,
               maker: maker.publicKey,
               controllerProgram: controllerProgram.programId,
@@ -2318,17 +2420,18 @@ describe("b1nary-options", () => {
             })
             .instruction();
 
-        const tx = new Transaction()
-          .add(ed25519Ix)
-          .add(executeOrderIx);
         const { blockhash, lastValidBlockHeight } =
           await connection.getLatestBlockhash();
-        tx.recentBlockhash = blockhash;
-        tx.feePayer = user.publicKey;
-        tx.sign(user);
+        const messageV0 = new TransactionMessage({
+          payerKey: user.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [ed25519Ix, executeOrderIx],
+        }).compileToV0Message();
+        const vtx = new VersionedTransaction(messageV0);
+        vtx.sign([user]);
 
         const sig = await connection.sendRawTransaction(
-          tx.serialize()
+          vtx.serialize()
         );
         await connection.confirmTransaction(
           { signature: sig, blockhash, lastValidBlockHeight }
@@ -2579,6 +2682,9 @@ describe("b1nary-options", () => {
               userPremiumAccount: userPremiumAccount,
               treasuryAccount: treasuryPremiumAccount,
               makerOtokenBalance: newMmBalPda,
+              vaultMm: findVaultMMPda(
+                newVaultPda, batchSettlerProgram.programId
+              )[0],
               user: user.publicKey,
               maker: maker.publicKey,
               controllerProgram: controllerProgram.programId,
@@ -2588,17 +2694,18 @@ describe("b1nary-options", () => {
             })
             .instruction();
 
-        const tx = new Transaction()
-          .add(ed25519Ix)
-          .add(executeOrderIx);
         const { blockhash } =
           await connection.getLatestBlockhash();
-        tx.recentBlockhash = blockhash;
-        tx.feePayer = user.publicKey;
-        tx.sign(user);
+        const msgV0 = new TransactionMessage({
+          payerKey: user.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [ed25519Ix, executeOrderIx],
+        }).compileToV0Message();
+        const vtx = new VersionedTransaction(msgV0);
+        vtx.sign([user]);
 
         try {
-          await connection.sendRawTransaction(tx.serialize());
+          await connection.sendRawTransaction(vtx.serialize());
           assert.fail("should reject stale nonce");
         } catch (err: any) {
           if (err.message === "should reject stale nonce")
