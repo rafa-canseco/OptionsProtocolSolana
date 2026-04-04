@@ -12,11 +12,13 @@ import {
   createAccount,
   mintTo,
   getAccount,
+  getMint,
 } from "@solana/spl-token";
 import { assert } from "chai";
 import { AddressBook } from "../target/types/address_book";
 import { MarginPool } from "../target/types/margin_pool";
 import { Controller } from "../target/types/controller";
+import { OtokenFactory } from "../target/types/otoken_factory";
 
 const ZERO_PUBKEY = PublicKey.default;
 
@@ -101,6 +103,61 @@ function findVaultPda(
   );
 }
 
+function findFactoryConfigPda(
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("factory_config")],
+    programId
+  );
+}
+
+function findOTokenPda(
+  underlying: PublicKey,
+  strikeAsset: PublicKey,
+  collateral: PublicKey,
+  strikePrice: BN,
+  expiry: BN,
+  isPut: boolean,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("otoken"),
+      underlying.toBuffer(),
+      strikeAsset.toBuffer(),
+      collateral.toBuffer(),
+      strikePrice.toArrayLike(Buffer, "le", 8),
+      expiry.toArrayLike(Buffer, "le", 8),
+      Buffer.from([isPut ? 1 : 0]),
+    ],
+    programId
+  );
+}
+
+function findOTokenMintPda(
+  underlying: PublicKey,
+  strikeAsset: PublicKey,
+  collateral: PublicKey,
+  strikePrice: BN,
+  expiry: BN,
+  isPut: boolean,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("otoken_mint"),
+      underlying.toBuffer(),
+      strikeAsset.toBuffer(),
+      collateral.toBuffer(),
+      strikePrice.toArrayLike(Buffer, "le", 8),
+      expiry.toArrayLike(Buffer, "le", 8),
+      Buffer.from([isPut ? 1 : 0]),
+    ],
+    programId
+  );
+}
+
 async function fundAccount(
   provider: anchor.AnchorProvider,
   pubkey: PublicKey,
@@ -126,6 +183,8 @@ describe("b1nary-options", () => {
     .marginPool as Program<MarginPool>;
   const controllerProgram = anchor.workspace
     .controller as Program<Controller>;
+  const otokenFactoryProgram = anchor.workspace
+    .otokenFactory as Program<OtokenFactory>;
 
   const admin = provider.wallet as anchor.Wallet;
   const connection = provider.connection;
@@ -1390,6 +1449,574 @@ describe("b1nary-options", () => {
         // The constraint checks caller == admin || caller == partial_pauser
         assert.include(err.toString(), "nauthorized");
       }
+    });
+  });
+
+  // ───────────────────────────────────────────
+  // OTokenFactory tests
+  // ───────────────────────────────────────────
+  describe("otoken_factory", () => {
+    const [factoryConfigPda] = findFactoryConfigPda(
+      otokenFactoryProgram.programId
+    );
+
+    // Controller config PDA (initialized in controller tests)
+    const [controllerConfigPda] = findControllerConfigPda(
+      controllerProgram.programId
+    );
+
+    const underlying = Keypair.generate().publicKey;
+    const strikeAsset = Keypair.generate().publicKey;
+    const collateral = Keypair.generate().publicKey;
+    const strikePrice = new BN("200000000000"); // $2000
+    const expiry = new BN(1735689600);
+    const isPut = true;
+
+    it("initializes factory with admin", async () => {
+      await otokenFactoryProgram.methods
+        .initialize(admin.publicKey)
+        .accounts({
+          payer: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await otokenFactoryProgram.account.factoryConfig.fetch(
+          factoryConfigPda
+        );
+      assert.ok(
+        config.admin.equals(admin.publicKey),
+        "admin matches"
+      );
+      assert.ok(
+        config.controller.equals(ZERO_PUBKEY),
+        "controller starts zero"
+      );
+      assert.equal(
+        config.otokenCount.toNumber(),
+        0,
+        "otoken count starts at 0"
+      );
+    });
+
+    it("rejects create_otoken before controller is set", async () => {
+      const [otokenPda] = findOTokenPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda] = findOTokenMintPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      try {
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            underlying,
+            strikeAsset,
+            collateral,
+            strikePrice,
+            expiry,
+            isPut
+          )
+          .accounts({
+            factoryConfig: factoryConfigPda,
+            otoken: otokenPda,
+            otokenMint: otokenMintPda,
+            controllerAuthority: controllerConfigPda,
+            admin: admin.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        assert.fail("should reject without controller");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "Controller not set"
+        );
+      }
+    });
+
+    it("sets controller", async () => {
+      await otokenFactoryProgram.methods
+        .setController(controllerConfigPda)
+        .accounts({
+          admin: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await otokenFactoryProgram.account.factoryConfig.fetch(
+          factoryConfigPda
+        );
+      assert.ok(
+        config.controller.equals(controllerConfigPda),
+        "controller set"
+      );
+    });
+
+    it("rejects set_controller from non-admin", async () => {
+      const imposter = Keypair.generate();
+      await fundAccount(
+        provider,
+        imposter.publicKey,
+        LAMPORTS_PER_SOL
+      );
+
+      try {
+        await otokenFactoryProgram.methods
+          .setController(Keypair.generate().publicKey)
+          .accounts({
+            admin: imposter.publicKey,
+          })
+          .signers([imposter])
+          .rpc();
+        assert.fail("should reject non-admin");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "AnchorError caused by account: factory_config"
+        );
+      }
+    });
+
+    it("creates oToken with SPL mint and metadata", async () => {
+      const [otokenPda] = findOTokenPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda] = findOTokenMintPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      await otokenFactoryProgram.methods
+        .createOtoken(
+          underlying,
+          strikeAsset,
+          collateral,
+          strikePrice,
+          expiry,
+          isPut
+        )
+        .accounts({
+          factoryConfig: factoryConfigPda,
+          otoken: otokenPda,
+          otokenMint: otokenMintPda,
+          controllerAuthority: controllerConfigPda,
+          admin: admin.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      // Verify OToken metadata
+      const otoken =
+        await otokenFactoryProgram.account.oToken.fetch(
+          otokenPda
+        );
+      assert.ok(
+        otoken.underlying.equals(underlying),
+        "underlying matches"
+      );
+      assert.ok(
+        otoken.strikeAsset.equals(strikeAsset),
+        "strike asset matches"
+      );
+      assert.ok(
+        otoken.collateral.equals(collateral),
+        "collateral matches"
+      );
+      assert.equal(
+        otoken.strikePrice.toString(),
+        "200000000000",
+        "strike price matches"
+      );
+      assert.equal(
+        otoken.expiry.toNumber(),
+        1735689600,
+        "expiry matches"
+      );
+      assert.equal(otoken.isPut, true, "is_put matches");
+      assert.ok(
+        otoken.mint.equals(otokenMintPda),
+        "mint address stored"
+      );
+
+      // Verify SPL mint properties
+      const mintInfo = await getMint(
+        connection,
+        otokenMintPda
+      );
+      assert.equal(mintInfo.decimals, 8, "8 decimals");
+      assert.ok(
+        mintInfo.mintAuthority.equals(controllerConfigPda),
+        "mint authority is controller config PDA"
+      );
+      assert.equal(
+        Number(mintInfo.supply),
+        0,
+        "zero supply initially"
+      );
+
+      // Verify counter incremented
+      const config =
+        await otokenFactoryProgram.account.factoryConfig.fetch(
+          factoryConfigPda
+        );
+      assert.equal(
+        config.otokenCount.toNumber(),
+        1,
+        "otoken count is 1"
+      );
+    });
+
+    it("prevents duplicate oToken creation (same params)", async () => {
+      const [otokenPda] = findOTokenPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda] = findOTokenMintPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      try {
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            underlying,
+            strikeAsset,
+            collateral,
+            strikePrice,
+            expiry,
+            isPut
+          )
+          .accounts({
+            factoryConfig: factoryConfigPda,
+            otoken: otokenPda,
+            otokenMint: otokenMintPda,
+            controllerAuthority: controllerConfigPda,
+            admin: admin.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        assert.fail("should reject duplicate oToken");
+      } catch (err: any) {
+        // PDA already initialized: Anchor/runtime rejects
+        assert.ok(
+          err.toString().length > 0,
+          "error thrown for duplicate"
+        );
+      }
+    });
+
+    it("creates a second oToken with different params", async () => {
+      const underlying2 = Keypair.generate().publicKey;
+      const strikePrice2 = new BN("300000000000"); // $3000
+
+      const [otokenPda2] = findOTokenPda(
+        underlying2,
+        strikeAsset,
+        collateral,
+        strikePrice2,
+        expiry,
+        false,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda2] = findOTokenMintPda(
+        underlying2,
+        strikeAsset,
+        collateral,
+        strikePrice2,
+        expiry,
+        false,
+        otokenFactoryProgram.programId
+      );
+
+      await otokenFactoryProgram.methods
+        .createOtoken(
+          underlying2,
+          strikeAsset,
+          collateral,
+          strikePrice2,
+          expiry,
+          false
+        )
+        .accounts({
+          factoryConfig: factoryConfigPda,
+          otoken: otokenPda2,
+          otokenMint: otokenMintPda2,
+          controllerAuthority: controllerConfigPda,
+          admin: admin.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const otoken =
+        await otokenFactoryProgram.account.oToken.fetch(
+          otokenPda2
+        );
+      assert.ok(
+        otoken.underlying.equals(underlying2),
+        "second oToken underlying"
+      );
+      assert.equal(
+        otoken.strikePrice.toString(),
+        "300000000000",
+        "second oToken strike"
+      );
+      assert.equal(
+        otoken.isPut,
+        false,
+        "second oToken is call"
+      );
+
+      const config =
+        await otokenFactoryProgram.account.factoryConfig.fetch(
+          factoryConfigPda
+        );
+      assert.equal(
+        config.otokenCount.toNumber(),
+        2,
+        "otoken count is 2"
+      );
+    });
+
+    it("rejects create_otoken from non-admin", async () => {
+      const imposter = Keypair.generate();
+      await fundAccount(
+        provider,
+        imposter.publicKey,
+        LAMPORTS_PER_SOL
+      );
+
+      const newUnderlying = Keypair.generate().publicKey;
+      const [otokenPda] = findOTokenPda(
+        newUnderlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda] = findOTokenMintPda(
+        newUnderlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      try {
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            newUnderlying,
+            strikeAsset,
+            collateral,
+            strikePrice,
+            expiry,
+            isPut
+          )
+          .accounts({
+            factoryConfig: factoryConfigPda,
+            otoken: otokenPda,
+            otokenMint: otokenMintPda,
+            controllerAuthority: controllerConfigPda,
+            admin: imposter.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([imposter])
+          .rpc();
+        assert.fail("should reject non-admin");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "AnchorError caused by account: factory_config"
+        );
+      }
+    });
+
+    it("rejects zero strike price", async () => {
+      const newUnderlying = Keypair.generate().publicKey;
+      const zeroStrike = new BN(0);
+
+      const [otokenPda] = findOTokenPda(
+        newUnderlying,
+        strikeAsset,
+        collateral,
+        zeroStrike,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda] = findOTokenMintPda(
+        newUnderlying,
+        strikeAsset,
+        collateral,
+        zeroStrike,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      try {
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            newUnderlying,
+            strikeAsset,
+            collateral,
+            zeroStrike,
+            expiry,
+            isPut
+          )
+          .accounts({
+            factoryConfig: factoryConfigPda,
+            otoken: otokenPda,
+            otokenMint: otokenMintPda,
+            controllerAuthority: controllerConfigPda,
+            admin: admin.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        assert.fail("should reject zero strike");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "Strike price must be greater than zero"
+        );
+      }
+    });
+
+    it("rejects wrong controller authority", async () => {
+      const newUnderlying = Keypair.generate().publicKey;
+      const wrongAuthority = Keypair.generate().publicKey;
+
+      const [otokenPda] = findOTokenPda(
+        newUnderlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+      const [otokenMintPda] = findOTokenMintPda(
+        newUnderlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      try {
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            newUnderlying,
+            strikeAsset,
+            collateral,
+            strikePrice,
+            expiry,
+            isPut
+          )
+          .accounts({
+            factoryConfig: factoryConfigPda,
+            otoken: otokenPda,
+            otokenMint: otokenMintPda,
+            controllerAuthority: wrongAuthority,
+            admin: admin.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
+        assert.fail("should reject wrong controller");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "Invalid controller authority"
+        );
+      }
+    });
+
+    it("reads oToken details from PDA (getOtokenDetails)", async () => {
+      const [otokenPda] = findOTokenPda(
+        underlying,
+        strikeAsset,
+        collateral,
+        strikePrice,
+        expiry,
+        isPut,
+        otokenFactoryProgram.programId
+      );
+
+      const otoken =
+        await otokenFactoryProgram.account.oToken.fetch(
+          otokenPda
+        );
+
+      assert.ok(
+        otoken.underlying.equals(underlying),
+        "underlying"
+      );
+      assert.ok(
+        otoken.strikeAsset.equals(strikeAsset),
+        "strike asset"
+      );
+      assert.ok(
+        otoken.collateral.equals(collateral),
+        "collateral"
+      );
+      assert.equal(
+        otoken.strikePrice.toString(),
+        "200000000000",
+        "strike price"
+      );
+      assert.equal(
+        otoken.expiry.toNumber(),
+        1735689600,
+        "expiry"
+      );
+      assert.equal(otoken.isPut, true, "is put");
+      assert.ok(otoken.mint.toBuffer().length > 0, "has mint");
     });
   });
 });
