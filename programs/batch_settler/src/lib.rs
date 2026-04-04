@@ -36,7 +36,6 @@ pub mod batch_settler {
         config.protocol_fee_bps = protocol_fee_bps;
         config.paused = false;
         config.escape_delay = escape_delay;
-        config.batch_nonce = 0;
         config.jupiter_program = jupiter_program;
         config.bump = ctx.bumps.settler_config;
         emit!(SettlerInitialized {
@@ -327,6 +326,7 @@ pub mod batch_settler {
     /// Collateral payout goes to MM's token account.
     pub fn redeem_for_mm(ctx: Context<RedeemForMM>, amount: u64) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
+        require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
         let mm_bal = &ctx.accounts.maker_otoken_balance;
         require!(
             mm_bal.balance >= amount,
@@ -367,6 +367,7 @@ pub mod batch_settler {
         )?;
 
         // Transfer payout from settler's collateral account to MM
+        ctx.accounts.settler_collateral_account.reload()?;
         let payout = ctx.accounts.settler_collateral_account.amount;
         if payout > 0 {
             token::transfer(
@@ -449,6 +450,7 @@ pub mod batch_settler {
         )?;
 
         // Transfer payout to MM
+        ctx.accounts.settler_collateral_account.reload()?;
         let payout = ctx.accounts.settler_collateral_account.amount;
         if payout > 0 {
             token::transfer(
@@ -498,7 +500,7 @@ pub mod batch_settler {
     /// ix[2]: Kamino flash_repay
     #[allow(clippy::too_many_arguments)]
     pub fn physical_redeem(
-        ctx: Context<PhysicalRedeem>,
+        mut ctx: Context<PhysicalRedeem>,
         amount: u64,
         contra_amount: u64,
         jupiter_route_data: Vec<u8>,
@@ -506,29 +508,7 @@ pub mod batch_settler {
         require!(amount > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
 
-        let otoken_info = &ctx.accounts.otoken_info;
-        let clock = Clock::get()?;
-        require!(
-            clock.unix_timestamp >= otoken_info.expiry,
-            SettlerError::OptionNotExpired
-        );
-        require!(
-            otoken_info.expiry_price > 0,
-            SettlerError::ExpiryPriceNotSet
-        );
-
-        // ITM check
-        if otoken_info.is_put {
-            require!(
-                otoken_info.expiry_price < otoken_info.strike_price,
-                SettlerError::OptionNotITM
-            );
-        } else {
-            require!(
-                otoken_info.expiry_price > otoken_info.strike_price,
-                SettlerError::OptionNotITM
-            );
-        }
+        validate_itm(&ctx.accounts.otoken_info)?;
 
         let mm_bal = &ctx.accounts.maker_otoken_balance;
         require!(
@@ -536,7 +516,6 @@ pub mod batch_settler {
             SettlerError::InsufficientMMBalance
         );
 
-        // CEI: decrement MM balance before external calls
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
         mm_bal.balance = mm_bal
             .balance
@@ -546,92 +525,10 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
-        // 1. Transfer contra-asset to user (borrowed via flash loan in ix[0])
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.settler_contra_account.to_account_info(),
-                    to: ctx.accounts.user_contra_account.to_account_info(),
-                    authority: ctx.accounts.settler_config.to_account_info(),
-                },
-                signer_seeds,
-            ),
-            contra_amount,
-        )?;
-
-        // 2. Redeem oTokens → collateral to settler
-        controller::cpi::redeem(
-            CpiContext::new_with_signer(
-                ctx.accounts.controller_program.to_account_info(),
-                controller::cpi::accounts::Redeem {
-                    config: ctx.accounts.controller_config.to_account_info(),
-                    otoken_info: ctx.accounts.otoken_info.to_account_info(),
-                    otoken_mint: ctx.accounts.otoken_mint.to_account_info(),
-                    redeemer_otoken_account: ctx.accounts.settler_otoken_account.to_account_info(),
-                    redeemer_collateral_account: ctx
-                        .accounts
-                        .settler_collateral_account
-                        .to_account_info(),
-                    pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
-                    pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
-                    redeemer: ctx.accounts.settler_config.to_account_info(),
-                    token_program: ctx.accounts.token_program.to_account_info(),
-                },
-                signer_seeds,
-            ),
-            amount,
-        )?;
-
-        // 3. Jupiter swap: collateral → contra-asset
-        let jupiter_program = &ctx.accounts.jupiter_program;
-        require!(
-            jupiter_program.key() == ctx.accounts.settler_config.jupiter_program,
-            SettlerError::InvalidJupiterProgram
-        );
-
-        let mut accounts_meta = Vec::new();
-        for acct in ctx.remaining_accounts {
-            let is_signer = acct.key() == ctx.accounts.settler_config.key();
-            accounts_meta.push(if acct.is_writable {
-                anchor_lang::solana_program::instruction::AccountMeta::new(*acct.key, is_signer)
-            } else {
-                anchor_lang::solana_program::instruction::AccountMeta::new_readonly(
-                    *acct.key, is_signer,
-                )
-            });
-        }
-
-        let jupiter_ix = anchor_lang::solana_program::instruction::Instruction {
-            program_id: jupiter_program.key(),
-            accounts: accounts_meta,
-            data: jupiter_route_data,
-        };
-
-        let account_infos: Vec<AccountInfo> = ctx.remaining_accounts.to_vec();
-        anchor_lang::solana_program::program::invoke_signed(
-            &jupiter_ix,
-            &account_infos,
-            signer_seeds,
-        )?;
-
-        // 4. Transfer surplus collateral to MM (if any remains)
-        ctx.accounts.settler_collateral_account.reload()?;
-        let surplus = ctx.accounts.settler_collateral_account.amount;
-        if surplus > 0 {
-            token::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
-                        from: ctx.accounts.settler_collateral_account.to_account_info(),
-                        to: ctx.accounts.mm_collateral_account.to_account_info(),
-                        authority: ctx.accounts.settler_config.to_account_info(),
-                    },
-                    signer_seeds,
-                ),
-                surplus,
-            )?;
-        }
+        transfer_contra_to_user(&ctx, signer_seeds, contra_amount)?;
+        cpi_redeem_otoken(&ctx, signer_seeds, amount)?;
+        invoke_jupiter_swap(&ctx, signer_seeds, jupiter_route_data)?;
+        transfer_surplus_to_mm(&mut ctx, signer_seeds)?;
 
         emit!(PhysicalDeliveryEvent {
             user: ctx.accounts.user.key(),
@@ -657,7 +554,6 @@ pub struct SettlerConfig {
     pub protocol_fee_bps: u16,
     pub paused: bool,
     pub escape_delay: i64,
-    pub batch_nonce: u64,
     pub jupiter_program: Pubkey,
     pub bump: u8,
 }
@@ -707,7 +603,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + 32 + 32 + 32 + 2 + 1 + 8 + 8 + 32 + 1,
+        space = 8 + 32 + 32 + 32 + 2 + 1 + 8 + 32 + 1,
         seeds = [b"settler_config"],
         bump,
     )]
@@ -1235,19 +1131,6 @@ pub struct PhysicalRedeem<'info> {
     // remaining_accounts: Jupiter route accounts
 }
 
-#[derive(Accounts)]
-pub struct OperatorAction<'info> {
-    #[account(
-        mut,
-        seeds = [b"settler_config"],
-        bump = settler_config.bump,
-        constraint = operator.key() == settler_config.operator
-            @ SettlerError::Unauthorized,
-    )]
-    pub settler_config: Account<'info, SettlerConfig>,
-    pub operator: Signer<'info>,
-}
-
 // ============================================================
 // Events
 // ============================================================
@@ -1628,6 +1511,134 @@ fn transfer_premium(
                 signer_seeds,
             ),
             fee,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_itm(otoken_info: &controller::OTokenInfo) -> Result<()> {
+    let clock = Clock::get()?;
+    require!(
+        clock.unix_timestamp >= otoken_info.expiry,
+        SettlerError::OptionNotExpired
+    );
+    require!(
+        otoken_info.expiry_price > 0,
+        SettlerError::ExpiryPriceNotSet
+    );
+    if otoken_info.is_put {
+        require!(
+            otoken_info.expiry_price < otoken_info.strike_price,
+            SettlerError::OptionNotITM
+        );
+    } else {
+        require!(
+            otoken_info.expiry_price > otoken_info.strike_price,
+            SettlerError::OptionNotITM
+        );
+    }
+    Ok(())
+}
+
+fn transfer_contra_to_user(
+    ctx: &Context<PhysicalRedeem>,
+    signer_seeds: &[&[&[u8]]],
+    contra_amount: u64,
+) -> Result<()> {
+    token::transfer(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.settler_contra_account.to_account_info(),
+                to: ctx.accounts.user_contra_account.to_account_info(),
+                authority: ctx.accounts.settler_config.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        contra_amount,
+    )
+}
+
+fn cpi_redeem_otoken(
+    ctx: &Context<PhysicalRedeem>,
+    signer_seeds: &[&[&[u8]]],
+    amount: u64,
+) -> Result<()> {
+    controller::cpi::redeem(
+        CpiContext::new_with_signer(
+            ctx.accounts.controller_program.to_account_info(),
+            controller::cpi::accounts::Redeem {
+                config: ctx.accounts.controller_config.to_account_info(),
+                otoken_info: ctx.accounts.otoken_info.to_account_info(),
+                otoken_mint: ctx.accounts.otoken_mint.to_account_info(),
+                redeemer_otoken_account: ctx.accounts.settler_otoken_account.to_account_info(),
+                redeemer_collateral_account: ctx
+                    .accounts
+                    .settler_collateral_account
+                    .to_account_info(),
+                pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
+                redeemer: ctx.accounts.settler_config.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+            signer_seeds,
+        ),
+        amount,
+    )
+}
+
+fn invoke_jupiter_swap(
+    ctx: &Context<PhysicalRedeem>,
+    signer_seeds: &[&[&[u8]]],
+    jupiter_route_data: Vec<u8>,
+) -> Result<()> {
+    let jupiter_program = &ctx.accounts.jupiter_program;
+    require!(
+        jupiter_program.key() == ctx.accounts.settler_config.jupiter_program,
+        SettlerError::InvalidJupiterProgram
+    );
+
+    let mut accounts_meta = Vec::new();
+    for acct in ctx.remaining_accounts {
+        let is_signer = acct.key() == ctx.accounts.settler_config.key();
+        accounts_meta.push(if acct.is_writable {
+            anchor_lang::solana_program::instruction::AccountMeta::new(*acct.key, is_signer)
+        } else {
+            anchor_lang::solana_program::instruction::AccountMeta::new_readonly(
+                *acct.key, is_signer,
+            )
+        });
+    }
+
+    let jupiter_ix = anchor_lang::solana_program::instruction::Instruction {
+        program_id: jupiter_program.key(),
+        accounts: accounts_meta,
+        data: jupiter_route_data,
+    };
+
+    let account_infos: Vec<AccountInfo> = ctx.remaining_accounts.to_vec();
+    anchor_lang::solana_program::program::invoke_signed(&jupiter_ix, &account_infos, signer_seeds)
+        .map_err(Into::into)
+}
+
+fn transfer_surplus_to_mm(
+    ctx: &mut Context<PhysicalRedeem>,
+    signer_seeds: &[&[&[u8]]],
+) -> Result<()> {
+    ctx.accounts.settler_collateral_account.reload()?;
+    let surplus = ctx.accounts.settler_collateral_account.amount;
+    if surplus > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.settler_collateral_account.to_account_info(),
+                    to: ctx.accounts.mm_collateral_account.to_account_info(),
+                    authority: ctx.accounts.settler_config.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            surplus,
         )?;
     }
     Ok(())
