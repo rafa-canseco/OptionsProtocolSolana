@@ -5,6 +5,10 @@ import {
   PublicKey,
   SystemProgram,
   LAMPORTS_PER_SOL,
+  Ed25519Program,
+  TransactionInstruction,
+  Transaction,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -13,12 +17,14 @@ import {
   mintTo,
   getAccount,
   getMint,
+  approve,
 } from "@solana/spl-token";
 import { assert } from "chai";
 import { AddressBook } from "../target/types/address_book";
 import { MarginPool } from "../target/types/margin_pool";
 import { Controller } from "../target/types/controller";
 import { OtokenFactory } from "../target/types/otoken_factory";
+import { BatchSettler } from "../target/types/batch_settler";
 
 const ZERO_PUBKEY = PublicKey.default;
 
@@ -158,6 +164,40 @@ function findOTokenMintPda(
   );
 }
 
+function findSettlerConfigPda(
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("settler_config")],
+    programId
+  );
+}
+
+function findMakerStatePda(
+  maker: PublicKey,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("maker"), maker.toBuffer()],
+    programId
+  );
+}
+
+function findQuoteFillPda(
+  maker: PublicKey,
+  quoteId: BN,
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("quote_fill"),
+      maker.toBuffer(),
+      quoteId.toArrayLike(Buffer, "le", 8),
+    ],
+    programId
+  );
+}
+
 async function fundAccount(
   provider: anchor.AnchorProvider,
   pubkey: PublicKey,
@@ -185,6 +225,8 @@ describe("b1nary-options", () => {
     .controller as Program<Controller>;
   const otokenFactoryProgram = anchor.workspace
     .otokenFactory as Program<OtokenFactory>;
+  const batchSettlerProgram = anchor.workspace
+    .batchSettler as Program<BatchSettler>;
 
   const admin = provider.wallet as anchor.Wallet;
   const connection = provider.connection;
@@ -2017,6 +2059,351 @@ describe("b1nary-options", () => {
       );
       assert.equal(otoken.isPut, true, "is put");
       assert.ok(otoken.mint.toBuffer().length > 0, "has mint");
+    });
+  });
+
+  // ───────────────────────────────────────────
+  // BatchSettler tests
+  // ───────────────────────────────────────────
+  describe("batch_settler", () => {
+    const [settlerConfigPda] = findSettlerConfigPda(
+      batchSettlerProgram.programId
+    );
+
+    const operator = Keypair.generate();
+    const treasury = Keypair.generate();
+    const maker = Keypair.generate();
+    const buyer = Keypair.generate();
+    const feeBps = 500; // 5%
+
+    before(async () => {
+      // Fund test accounts
+      await fundAccount(
+        provider,
+        operator.publicKey,
+        5 * LAMPORTS_PER_SOL
+      );
+      await fundAccount(
+        provider,
+        maker.publicKey,
+        5 * LAMPORTS_PER_SOL
+      );
+      await fundAccount(
+        provider,
+        buyer.publicKey,
+        5 * LAMPORTS_PER_SOL
+      );
+      await fundAccount(
+        provider,
+        treasury.publicKey,
+        LAMPORTS_PER_SOL
+      );
+    });
+
+    it("initializes settler config", async () => {
+      await batchSettlerProgram.methods
+        .initialize(
+          operator.publicKey,
+          treasury.publicKey,
+          feeBps
+        )
+        .accounts({
+          payer: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.ok(
+        config.owner.equals(admin.publicKey),
+        "owner is admin"
+      );
+      assert.ok(
+        config.operator.equals(operator.publicKey),
+        "operator set"
+      );
+      assert.ok(
+        config.treasury.equals(treasury.publicKey),
+        "treasury set"
+      );
+      assert.equal(
+        config.protocolFeeBps,
+        feeBps,
+        "fee bps"
+      );
+      assert.equal(config.paused, false, "not paused");
+    });
+
+    it("rejects fee above 2000 bps", async () => {
+      try {
+        await batchSettlerProgram.methods
+          .setProtocolFee(2001)
+          .accounts({
+            owner: admin.publicKey,
+          })
+          .rpc();
+        assert.fail("should reject");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "FeeTooHigh"
+        );
+      }
+    });
+
+    it("whitelists a maker", async () => {
+      await batchSettlerProgram.methods
+        .whitelistMaker(maker.publicKey, true)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
+      const state =
+        await batchSettlerProgram.account.makerState.fetch(
+          makerStatePda
+        );
+      assert.ok(
+        state.maker.equals(maker.publicKey),
+        "maker set"
+      );
+      assert.equal(state.whitelisted, true, "whitelisted");
+      assert.equal(
+        state.nonce.toNumber(),
+        0,
+        "nonce starts at 0"
+      );
+    });
+
+    it("rejects non-owner whitelist", async () => {
+      try {
+        await batchSettlerProgram.methods
+          .whitelistMaker(maker.publicKey, false)
+          .accounts({
+            owner: buyer.publicKey,
+          })
+          .signers([buyer])
+          .rpc();
+        assert.fail("should reject");
+      } catch (err: any) {
+        assert.include(err.toString(), "ConstraintHasOne");
+      }
+    });
+
+    it("increments maker nonce", async () => {
+      await batchSettlerProgram.methods
+        .incrementMakerNonce()
+        .accounts({
+          maker: maker.publicKey,
+        })
+        .signers([maker])
+        .rpc();
+
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
+      const state =
+        await batchSettlerProgram.account.makerState.fetch(
+          makerStatePda
+        );
+      assert.equal(
+        state.nonce.toNumber(),
+        1,
+        "nonce incremented"
+      );
+    });
+
+    it("cancels a quote", async () => {
+      const quoteId = new BN(42);
+      await batchSettlerProgram.methods
+        .cancelQuote(quoteId)
+        .accounts({
+          maker: maker.publicKey,
+        })
+        .signers([maker])
+        .rpc();
+
+      const [quoteFillPda] = findQuoteFillPda(
+        maker.publicKey,
+        quoteId,
+        batchSettlerProgram.programId
+      );
+      const fill =
+        await batchSettlerProgram.account.quoteFill.fetch(
+          quoteFillPda
+        );
+      assert.equal(fill.cancelled, true, "quote cancelled");
+      assert.equal(
+        fill.filledAmount.toNumber(),
+        0,
+        "no fills"
+      );
+    });
+
+    it("rejects double cancellation", async () => {
+      const quoteId = new BN(42);
+      try {
+        await batchSettlerProgram.methods
+          .cancelQuote(quoteId)
+          .accounts({
+            maker: maker.publicKey,
+          })
+          .signers([maker])
+          .rpc();
+        assert.fail("should reject double cancel");
+      } catch (err: any) {
+        assert.include(
+          err.toString(),
+          "QuoteAlreadyCancelled"
+        );
+      }
+    });
+
+    it("updates treasury", async () => {
+      const newTreasury = Keypair.generate().publicKey;
+      await batchSettlerProgram.methods
+        .setTreasury(newTreasury)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.ok(
+        config.treasury.equals(newTreasury),
+        "treasury updated"
+      );
+
+      // Restore original treasury for later tests
+      await batchSettlerProgram.methods
+        .setTreasury(treasury.publicKey)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    it("updates protocol fee", async () => {
+      await batchSettlerProgram.methods
+        .setProtocolFee(1000)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.equal(
+        config.protocolFeeBps,
+        1000,
+        "fee updated to 10%"
+      );
+
+      // Restore original fee
+      await batchSettlerProgram.methods
+        .setProtocolFee(feeBps)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    it("pauses and unpauses", async () => {
+      await batchSettlerProgram.methods
+        .pause(true)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      let config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.equal(config.paused, true, "paused");
+
+      await batchSettlerProgram.methods
+        .pause(false)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.equal(config.paused, false, "unpaused");
+    });
+
+    it("updates operator", async () => {
+      const newOp = Keypair.generate().publicKey;
+      await batchSettlerProgram.methods
+        .setOperator(newOp)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const config =
+        await batchSettlerProgram.account.settlerConfig.fetch(
+          settlerConfigPda
+        );
+      assert.ok(
+        config.operator.equals(newOp),
+        "operator updated"
+      );
+
+      // Restore
+      await batchSettlerProgram.methods
+        .setOperator(operator.publicKey)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+    });
+
+    it("de-whitelists a maker", async () => {
+      await batchSettlerProgram.methods
+        .whitelistMaker(maker.publicKey, false)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
+
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
+      const state =
+        await batchSettlerProgram.account.makerState.fetch(
+          makerStatePda
+        );
+      assert.equal(
+        state.whitelisted,
+        false,
+        "de-whitelisted"
+      );
+
+      // Re-whitelist for future tests
+      await batchSettlerProgram.methods
+        .whitelistMaker(maker.publicKey, true)
+        .accounts({
+          owner: admin.publicKey,
+        })
+        .rpc();
     });
   });
 });
