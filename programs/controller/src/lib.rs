@@ -27,7 +27,15 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn open_vault(ctx: Context<OpenVault>, collateral_mint: Pubkey) -> Result<()> {
+    pub fn open_vault(
+        ctx: Context<OpenVault>,
+        collateral_mint: Pubkey,
+        beneficiary: Pubkey,
+    ) -> Result<()> {
+        require!(
+            beneficiary != Pubkey::default(),
+            ControllerError::ZeroAddress
+        );
         let config = &ctx.accounts.config;
         require!(!config.fully_paused, ControllerError::SystemFullyPaused);
         require!(
@@ -45,6 +53,7 @@ pub mod controller {
         vault.otoken_mint = Pubkey::default();
         vault.short_amount = 0;
         vault.settled = false;
+        vault.beneficiary = beneficiary;
         vault.bump = ctx.bumps.vault;
 
         let vault_id = counter.next_id;
@@ -110,6 +119,12 @@ pub mod controller {
             ControllerError::SystemPartiallyPaused
         );
         require!(amount > 0, ControllerError::ZeroAmount);
+
+        let clock = Clock::get()?;
+        require!(
+            clock.unix_timestamp < ctx.accounts.otoken_info.expiry,
+            ControllerError::OptionExpired
+        );
 
         let vault = &mut ctx.accounts.vault;
         require!(!vault.settled, ControllerError::VaultSettled);
@@ -219,7 +234,7 @@ pub mod controller {
                     ctx.accounts.token_program.to_account_info(),
                     anchor_spl::token::Transfer {
                         from: ctx.accounts.pool_token_account.to_account_info(),
-                        to: ctx.accounts.owner_token_account.to_account_info(),
+                        to: ctx.accounts.beneficiary_token_account.to_account_info(),
                         authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
@@ -334,6 +349,60 @@ pub mod controller {
         Ok(())
     }
 
+    pub fn emergency_withdraw_vault(
+        ctx: Context<EmergencyWithdrawVault>,
+    ) -> Result<()> {
+        let config = &ctx.accounts.config;
+        require!(config.fully_paused, ControllerError::NotFullyPaused);
+
+        let vault = &ctx.accounts.vault;
+        require!(!vault.settled, ControllerError::VaultSettled);
+
+        let collateral_amount = vault.collateral_amount;
+        let collateral_mint = vault.collateral_mint;
+        let beneficiary = vault.beneficiary;
+        let vault_id = vault.vault_id;
+
+        let vault = &mut ctx.accounts.vault;
+        vault.settled = true;
+
+        if collateral_amount > 0 {
+            let pool_auth_bump = ctx.bumps.pool_vault_authority;
+            let seeds = &[
+                b"pool_vault_auth".as_ref(),
+                collateral_mint.as_ref(),
+                &[pool_auth_bump],
+            ];
+            let signer_seeds = &[&seeds[..]];
+
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    anchor_spl::token::Transfer {
+                        from: ctx.accounts.pool_token_account.to_account_info(),
+                        to: ctx
+                            .accounts
+                            .beneficiary_token_account
+                            .to_account_info(),
+                        authority: ctx
+                            .accounts
+                            .pool_vault_authority
+                            .to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                collateral_amount,
+            )?;
+        }
+
+        emit!(EmergencyWithdraw {
+            beneficiary,
+            vault_id,
+            collateral_amount,
+        });
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_otoken_info(
         ctx: Context<CreateOTokenInfo>,
@@ -417,6 +486,7 @@ pub struct Vault {
     pub otoken_mint: Pubkey,
     pub short_amount: u64,
     pub settled: bool,
+    pub beneficiary: Pubkey,
     pub bump: u8,
 }
 
@@ -459,6 +529,9 @@ fn get_required_collateral(
     }
 }
 
+/// Physical delivery payout: if ITM, full collateral is forfeited.
+/// The actual cash settlement difference is handled by the physical
+/// delivery mechanism (flash loan + swap in batch_settler).
 fn get_payout(
     strike_price: u64,
     expiry_price: u64,
@@ -467,42 +540,14 @@ fn get_payout(
     amount: u64,
 ) -> Result<u64> {
     if is_put {
-        // ITM if expiry_price < strike_price
         if expiry_price >= strike_price {
             return Ok(0);
         }
-        let price_diff = strike_price - expiry_price;
-        let numerator = (amount as u128)
-            .checked_mul(price_diff as u128)
-            .ok_or(ControllerError::MathOverflow)?;
-        let base: u128 = 10u128.pow(8 + 8 - collateral_decimals as u32);
-        let result = numerator
-            .checked_div(base)
-            .ok_or(ControllerError::MathOverflow)?;
-        let result_u64: u64 = result
-            .try_into()
-            .map_err(|_| ControllerError::MathOverflow)?;
-        Ok(result_u64)
-    } else {
-        // ITM if expiry_price > strike_price
-        if expiry_price <= strike_price {
-            return Ok(0);
-        }
-        // Call payout proportional to price difference,
-        // mirroring put logic: payout = amount * (expiry - strike) / 10^base
-        let price_diff = expiry_price - strike_price;
-        let numerator = (amount as u128)
-            .checked_mul(price_diff as u128)
-            .ok_or(ControllerError::MathOverflow)?;
-        let base: u128 = 10u128.pow(8 + 8 - collateral_decimals as u32);
-        let result = numerator
-            .checked_div(base)
-            .ok_or(ControllerError::MathOverflow)?;
-        let result_u64: u64 = result
-            .try_into()
-            .map_err(|_| ControllerError::MathOverflow)?;
-        Ok(result_u64)
+    } else if expiry_price <= strike_price {
+        return Ok(0);
     }
+    // ITM: full collateral forfeited
+    get_required_collateral(strike_price, is_put, collateral_decimals, amount)
 }
 
 #[derive(Accounts)]
@@ -548,7 +593,7 @@ pub struct OpenVault<'info> {
     #[account(
         init,
         payer = owner,
-        space = 8 + 32 + 8 + 32 + 8 + 32 + 8 + 1 + 1,
+        space = 8 + 32 + 8 + 32 + 8 + 32 + 8 + 1 + 32 + 1,
         seeds = [
             b"vault",
             owner.key().as_ref(),
@@ -681,8 +726,16 @@ pub struct SettleVault<'info> {
             @ ControllerError::Unauthorized,
     )]
     pub pool_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub owner_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = beneficiary_token_account.owner
+            == vault.beneficiary
+            @ ControllerError::Unauthorized,
+        constraint = beneficiary_token_account.mint
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub beneficiary_token_account: Account<'info, TokenAccount>,
     /// CHECK: PDA authority for pool vault, validated by seeds
     #[account(
         seeds = [
@@ -826,6 +879,57 @@ pub struct PauseAction<'info> {
     pub caller: Signer<'info>,
 }
 
+#[derive(Accounts)]
+pub struct EmergencyWithdrawVault<'info> {
+    #[account(
+        seeds = [b"controller_config"],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ControllerConfig>,
+    #[account(
+        mut,
+        has_one = owner,
+        seeds = [
+            b"vault",
+            vault.owner.as_ref(),
+            vault.vault_id.to_le_bytes().as_ref(),
+        ],
+        bump = vault.bump,
+    )]
+    pub vault: Account<'info, Vault>,
+    #[account(
+        mut,
+        constraint = pool_token_account.mint
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+        constraint = pool_token_account.owner
+            == pool_vault_authority.key()
+            @ ControllerError::Unauthorized,
+    )]
+    pub pool_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = beneficiary_token_account.owner
+            == vault.beneficiary
+            @ ControllerError::Unauthorized,
+        constraint = beneficiary_token_account.mint
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub beneficiary_token_account: Account<'info, TokenAccount>,
+    /// CHECK: PDA authority for pool vault
+    #[account(
+        seeds = [
+            b"pool_vault_auth",
+            vault.collateral_mint.as_ref(),
+        ],
+        bump,
+    )]
+    pub pool_vault_authority: AccountInfo<'info>,
+    pub owner: Signer<'info>,
+    pub token_program: Program<'info, Token>,
+}
+
 #[event]
 pub struct ControllerInitialized {
     pub admin: Pubkey,
@@ -879,6 +983,13 @@ pub struct SystemFullyPaused {
     pub caller: Pubkey,
 }
 
+#[event]
+pub struct EmergencyWithdraw {
+    pub beneficiary: Pubkey,
+    pub vault_id: u64,
+    pub collateral_amount: u64,
+}
+
 #[error_code]
 pub enum ControllerError {
     #[msg("Address cannot be zero")]
@@ -911,4 +1022,8 @@ pub enum ControllerError {
     ExpiryPriceAlreadySet,
     #[msg("Invalid collateral decimals")]
     InvalidDecimals,
+    #[msg("Option has expired")]
+    OptionExpired,
+    #[msg("System not fully paused")]
+    NotFullyPaused,
 }

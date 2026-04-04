@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar::instructions as ixs_sysvar;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
 use controller::program::Controller as ControllerProgram;
 use solana_sdk_ids::ed25519_program;
 
@@ -42,8 +42,6 @@ pub mod batch_settler {
     pub fn init_vault_counter(ctx: Context<InitVaultCounter>) -> Result<()> {
         let rent = Rent::get()?;
         let lamports = rent.minimum_balance(8 + 32 + 8 + 1);
-        // Pre-fund vault_counter PDA directly so Anchor's init
-        // skips transfer from settler PDA (which has data).
         anchor_lang::system_program::transfer(
             CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
@@ -111,9 +109,9 @@ pub mod batch_settler {
         Ok(())
     }
 
-    /// Instant settlement: buyer accepts MM's signed quote.
-    /// Opens vault, deposits MM collateral, mints oTokens to buyer,
-    /// transfers premium (net to MM, fee to treasury).
+    /// Instant settlement: user (option seller) accepts MM's signed quote.
+    /// Opens vault, deposits user's collateral, mints oTokens to settler
+    /// custody (for MM), transfers premium from MM to user.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_order(
         ctx: Context<ExecuteOrder>,
@@ -127,6 +125,7 @@ pub mod batch_settler {
         collateral_mint: Pubkey,
     ) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
+        require!(bid_price > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
 
         validate_maker(&ctx.accounts.maker_state, maker_nonce)?;
@@ -162,10 +161,23 @@ pub mod batch_settler {
         cpi_open_vault(&ctx, signer_seeds, collateral_mint)?;
         cpi_deposit_collateral(&ctx, signer_seeds, collateral_amount)?;
         cpi_mint_otoken(&ctx, signer_seeds, amount)?;
-        transfer_premium(&ctx, net, fee)?;
+
+        // Update MM custody ledger
+        let mm_bal = &mut ctx.accounts.maker_otoken_balance;
+        if mm_bal.maker == Pubkey::default() {
+            mm_bal.maker = ctx.accounts.maker.key();
+            mm_bal.otoken_mint = ctx.accounts.otoken_mint.key();
+        }
+        mm_bal.balance = mm_bal
+            .balance
+            .checked_add(amount)
+            .ok_or(SettlerError::MathOverflow)?;
+        mm_bal.bump = ctx.bumps.maker_otoken_balance;
+
+        transfer_premium(&ctx, signer_seeds, net, fee)?;
 
         emit!(OrderExecuted {
-            buyer: ctx.accounts.buyer.key(),
+            user: ctx.accounts.user.key(),
             maker: ctx.accounts.maker.key(),
             otoken_mint: ctx.accounts.otoken_mint.key(),
             amount,
@@ -176,8 +188,8 @@ pub mod batch_settler {
         Ok(())
     }
 
-    /// Settle an expired vault. Requires controller admin to co-sign.
-    /// Returned collateral goes to settler's token account.
+    /// Settle an expired vault. Returned collateral goes to vault
+    /// beneficiary (the user who sold the option).
     pub fn settle_vault(ctx: Context<SettleVaultForMaker>) -> Result<()> {
         controller::cpi::settle_vault(CpiContext::new(
             ctx.accounts.controller_program.to_account_info(),
@@ -186,7 +198,10 @@ pub mod batch_settler {
                 vault: ctx.accounts.vault.to_account_info(),
                 otoken_info: ctx.accounts.otoken_info.to_account_info(),
                 pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
-                owner_token_account: ctx.accounts.settler_collateral_account.to_account_info(),
+                beneficiary_token_account: ctx
+                    .accounts
+                    .beneficiary_token_account
+                    .to_account_info(),
                 pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                 admin: ctx.accounts.controller_admin.to_account_info(),
                 token_program: ctx.accounts.token_program.to_account_info(),
@@ -195,6 +210,59 @@ pub mod batch_settler {
         emit!(VaultSettledEvent {
             vault: ctx.accounts.vault.key(),
             operator: ctx.accounts.operator.key(),
+        });
+        Ok(())
+    }
+
+    /// Emergency withdrawal when system is fully paused. Burns custodied
+    /// oTokens, clears MM ledger, CPIs to controller to return full
+    /// collateral to vault beneficiary.
+    pub fn emergency_withdraw(ctx: Context<EmergencyWithdrawOrder>) -> Result<()> {
+        let bump = ctx.accounts.settler_config.bump;
+        let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
+
+        // Burn only this MM's custodied oTokens, not entire account
+        let burn_amount = ctx.accounts.maker_otoken_balance.balance;
+        if burn_amount > 0 {
+            token::burn(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Burn {
+                        mint: ctx.accounts.otoken_mint.to_account_info(),
+                        from: ctx.accounts.settler_otoken_account.to_account_info(),
+                        authority: ctx.accounts.settler_config.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                burn_amount,
+            )?;
+        }
+
+        // Clear MM balance
+        let mm_bal = &mut ctx.accounts.maker_otoken_balance;
+        mm_bal.balance = 0;
+
+        // CPI to controller: mark vault settled, return collateral
+        controller::cpi::emergency_withdraw_vault(CpiContext::new_with_signer(
+            ctx.accounts.controller_program.to_account_info(),
+            controller::cpi::accounts::EmergencyWithdrawVault {
+                config: ctx.accounts.controller_config.to_account_info(),
+                vault: ctx.accounts.vault.to_account_info(),
+                pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                beneficiary_token_account: ctx
+                    .accounts
+                    .beneficiary_token_account
+                    .to_account_info(),
+                pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
+                owner: ctx.accounts.settler_config.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+            signer_seeds,
+        ))?;
+
+        emit!(EmergencyWithdrawEvent {
+            beneficiary: ctx.accounts.beneficiary.key(),
+            vault: ctx.accounts.vault.key(),
         });
         Ok(())
     }
@@ -253,6 +321,16 @@ pub struct MakerState {
 pub struct QuoteFill {
     pub filled_amount: u64,
     pub cancelled: bool,
+    pub bump: u8,
+}
+
+/// Tracks custodied oToken balance per MM per oToken mint.
+/// PDA seeds: [b"mm_balance", maker.as_ref(), otoken_mint.as_ref()]
+#[account]
+pub struct MakerOTokenBalance {
+    pub maker: Pubkey,
+    pub otoken_mint: Pubkey,
+    pub balance: u64,
     pub bump: u8,
 }
 
@@ -378,7 +456,7 @@ pub struct ExecuteOrder<'info> {
     pub maker_state: Account<'info, MakerState>,
     #[account(
         init_if_needed,
-        payer = buyer,
+        payer = user,
         space = 8 + 8 + 1 + 1,
         seeds = [
             b"quote_fill",
@@ -402,21 +480,29 @@ pub struct ExecuteOrder<'info> {
     #[account(mut)]
     pub otoken_mint: Box<Account<'info, Mint>>,
 
-    /// MM's collateral token account (delegated to settler PDA)
+    /// User's collateral token account (delegated to settler PDA)
     #[account(mut)]
-    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub user_collateral_account: Box<Account<'info, TokenAccount>>,
     /// Controller pool receiving collateral
     #[account(mut)]
     pub pool_token_account: Box<Account<'info, TokenAccount>>,
-    /// Buyer receives minted oTokens here
-    #[account(mut)]
-    pub buyer_otoken_account: Box<Account<'info, TokenAccount>>,
-    /// Buyer pays premium from here
-    #[account(mut)]
-    pub buyer_premium_account: Box<Account<'info, TokenAccount>>,
-    /// MM receives net premium here
+    /// Settler's oToken account (custody for MM, owned by settler PDA)
+    #[account(
+        mut,
+        constraint = settler_otoken_account.mint
+            == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = settler_otoken_account.owner
+            == settler_config.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
+    /// MM's premium account (delegated to settler PDA, source of premium)
     #[account(mut)]
     pub mm_premium_account: Box<Account<'info, TokenAccount>>,
+    /// User receives net premium here
+    #[account(mut)]
+    pub user_premium_account: Box<Account<'info, TokenAccount>>,
     /// Treasury receives protocol fee here
     #[account(
         mut,
@@ -426,8 +512,23 @@ pub struct ExecuteOrder<'info> {
     )]
     pub treasury_account: Box<Account<'info, TokenAccount>>,
 
+    /// MM oToken balance tracking
+    #[account(
+        init_if_needed,
+        payer = user,
+        space = 8 + 32 + 32 + 8 + 1,
+        seeds = [
+            b"mm_balance",
+            maker.key().as_ref(),
+            otoken_mint.key().as_ref(),
+        ],
+        bump,
+    )]
+    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+
+    /// User (option seller) provides collateral and receives premium
     #[account(mut)]
-    pub buyer: Signer<'info>,
+    pub user: Signer<'info>,
     /// CHECK: Ed25519 signature verified via instruction introspection
     pub maker: AccountInfo<'info>,
 
@@ -459,13 +560,77 @@ pub struct SettleVaultForMaker<'info> {
     pub otoken_info: AccountInfo<'info>,
     #[account(mut)]
     pub pool_token_account: Account<'info, TokenAccount>,
-    /// Settler's account receiving returned collateral
+    /// Beneficiary's token account (receives returned collateral)
     #[account(mut)]
-    pub settler_collateral_account: Account<'info, TokenAccount>,
+    pub beneficiary_token_account: Account<'info, TokenAccount>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
     /// Controller admin must co-sign for settlement
     pub controller_admin: Signer<'info>,
+
+    pub controller_program: Program<'info, ControllerProgram>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct EmergencyWithdrawOrder<'info> {
+    #[account(
+        seeds = [b"settler_config"],
+        bump = settler_config.bump,
+    )]
+    pub settler_config: Account<'info, SettlerConfig>,
+
+    /// Vault beneficiary triggers the emergency withdrawal
+    #[account(
+        constraint = beneficiary.key() == vault.beneficiary
+            @ SettlerError::Unauthorized,
+    )]
+    pub beneficiary: Signer<'info>,
+
+    /// CHECK: Validated by controller CPI
+    pub controller_config: AccountInfo<'info>,
+    /// Deserialized to validate beneficiary matches signer
+    #[account(
+        mut,
+        constraint = vault.owner == settler_config.key()
+            @ SettlerError::Unauthorized,
+    )]
+    pub vault: Account<'info, controller::Vault>,
+    #[account(mut)]
+    pub pool_token_account: Account<'info, TokenAccount>,
+    /// Beneficiary's token account (receives collateral)
+    #[account(mut)]
+    pub beneficiary_token_account: Account<'info, TokenAccount>,
+    /// CHECK: Pool vault authority PDA
+    pub pool_vault_authority: AccountInfo<'info>,
+
+    /// CHECK: MM whose custody balance is being cleared
+    pub maker: AccountInfo<'info>,
+    /// oToken mint for burning
+    #[account(mut)]
+    pub otoken_mint: Account<'info, Mint>,
+    /// Settler's oToken custody account
+    #[account(
+        mut,
+        constraint = settler_otoken_account.owner
+            == settler_config.key()
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = settler_otoken_account.mint
+            == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub settler_otoken_account: Account<'info, TokenAccount>,
+    /// MM balance to clear (validated via PDA seeds)
+    #[account(
+        mut,
+        seeds = [
+            b"mm_balance",
+            maker.key().as_ref(),
+            otoken_mint.key().as_ref(),
+        ],
+        bump = maker_otoken_balance.bump,
+    )]
+    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
 
     pub controller_program: Program<'info, ControllerProgram>,
     pub token_program: Program<'info, Token>,
@@ -515,7 +680,7 @@ pub struct QuoteCancelled {
 
 #[event]
 pub struct OrderExecuted {
-    pub buyer: Pubkey,
+    pub user: Pubkey,
     pub maker: Pubkey,
     pub otoken_mint: Pubkey,
     pub amount: u64,
@@ -528,6 +693,12 @@ pub struct OrderExecuted {
 pub struct VaultSettledEvent {
     pub vault: Pubkey,
     pub operator: Pubkey,
+}
+
+#[event]
+pub struct EmergencyWithdrawEvent {
+    pub beneficiary: Pubkey,
+    pub vault: Pubkey,
 }
 
 #[event]
@@ -571,6 +742,8 @@ pub enum SettlerError {
     InvalidSignature,
     #[msg("Invalid treasury account")]
     InvalidTreasury,
+    #[msg("Invalid custody account")]
+    InvalidCustodyAccount,
     #[msg("Unauthorized")]
     Unauthorized,
 }
@@ -599,19 +772,26 @@ fn update_fill(fill: &mut QuoteFill, amount: u64, max_amount: u64) -> Result<()>
     Ok(())
 }
 
-fn compute_premium_split(amount: u64, bid_price: u64, fee_bps: u16) -> Result<(u64, u64, u64)> {
+fn compute_premium_split(
+    amount: u64,
+    bid_price: u64,
+    fee_bps: u16,
+) -> Result<(u64, u64, u64)> {
     let raw = (amount as u128)
         .checked_mul(bid_price as u128)
         .ok_or(SettlerError::MathOverflow)?
         .checked_div(PRICE_SCALE)
         .ok_or(SettlerError::MathOverflow)?;
-    let premium = u64::try_from(raw).map_err(|_| error!(SettlerError::MathOverflow))?;
+    let premium =
+        u64::try_from(raw).map_err(|_| error!(SettlerError::MathOverflow))?;
     let fee = premium
         .checked_mul(fee_bps as u64)
         .ok_or(SettlerError::MathOverflow)?
         .checked_div(10_000)
         .ok_or(SettlerError::MathOverflow)?;
-    let net = premium.checked_sub(fee).ok_or(SettlerError::MathOverflow)?;
+    let net = premium
+        .checked_sub(fee)
+        .ok_or(SettlerError::MathOverflow)?;
     Ok((premium, fee, net))
 }
 
@@ -647,9 +827,21 @@ fn verify_ed25519_signature(
     require!(ix.data.len() >= 16, SettlerError::InvalidEd25519Data);
     require!(ix.data[0] == 1, SettlerError::InvalidEd25519Data);
 
-    let pk_off = u16::from_le_bytes(ix.data[6..8].try_into().unwrap()) as usize;
-    let msg_off = u16::from_le_bytes(ix.data[10..12].try_into().unwrap()) as usize;
-    let msg_sz = u16::from_le_bytes(ix.data[12..14].try_into().unwrap()) as usize;
+    let pk_off = u16::from_le_bytes(
+        ix.data[6..8]
+            .try_into()
+            .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
+    ) as usize;
+    let msg_off = u16::from_le_bytes(
+        ix.data[10..12]
+            .try_into()
+            .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
+    ) as usize;
+    let msg_sz = u16::from_le_bytes(
+        ix.data[12..14]
+            .try_into()
+            .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
+    ) as usize;
 
     require!(
         pk_off + 32 <= ix.data.len(),
@@ -673,15 +865,16 @@ fn verify_ed25519_signature(
 
 fn fund_vault_rent(ctx: &Context<ExecuteOrder>) -> Result<()> {
     let rent = Rent::get()?;
-    let vault_space = 8 + 32 + 8 + 32 + 8 + 32 + 8 + 1 + 1;
+    // Vault space: discriminator + owner + vault_id + collateral_mint +
+    // collateral_amount + otoken_mint + short_amount + settled +
+    // beneficiary + bump
+    let vault_space = 8 + 32 + 8 + 32 + 8 + 32 + 8 + 1 + 32 + 1;
     let lamports = rent.minimum_balance(vault_space);
-    // Pre-fund vault PDA directly so Anchor's init skips
-    // transfer from settler PDA (which has data).
     anchor_lang::system_program::transfer(
         CpiContext::new(
             ctx.accounts.system_program.to_account_info(),
             anchor_lang::system_program::Transfer {
-                from: ctx.accounts.buyer.to_account_info(),
+                from: ctx.accounts.user.to_account_info(),
                 to: ctx.accounts.vault.to_account_info(),
             },
         ),
@@ -707,6 +900,7 @@ fn cpi_open_vault(
             signer_seeds,
         ),
         collateral_mint,
+        ctx.accounts.user.key(), // beneficiary = user (option seller)
     )
 }
 
@@ -721,8 +915,14 @@ fn cpi_deposit_collateral(
             controller::cpi::accounts::DepositCollateral {
                 config: ctx.accounts.controller_config.to_account_info(),
                 vault: ctx.accounts.vault.to_account_info(),
-                user_token_account: ctx.accounts.mm_collateral_account.to_account_info(),
-                pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                user_token_account: ctx
+                    .accounts
+                    .user_collateral_account
+                    .to_account_info(),
+                pool_token_account: ctx
+                    .accounts
+                    .pool_token_account
+                    .to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
                 token_program: ctx.accounts.token_program.to_account_info(),
             },
@@ -745,7 +945,10 @@ fn cpi_mint_otoken(
                 vault: ctx.accounts.vault.to_account_info(),
                 otoken_info: ctx.accounts.otoken_info.to_account_info(),
                 otoken_mint: ctx.accounts.otoken_mint.to_account_info(),
-                destination: ctx.accounts.buyer_otoken_account.to_account_info(),
+                destination: ctx
+                    .accounts
+                    .settler_otoken_account
+                    .to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
                 token_program: ctx.accounts.token_program.to_account_info(),
             },
@@ -755,29 +958,38 @@ fn cpi_mint_otoken(
     )
 }
 
-fn transfer_premium(ctx: &Context<ExecuteOrder>, net: u64, fee: u64) -> Result<()> {
+/// Premium flow: MM -> user (net), MM -> treasury (fee).
+/// MM's premium account must be delegated to settler PDA.
+fn transfer_premium(
+    ctx: &Context<ExecuteOrder>,
+    signer_seeds: &[&[&[u8]]],
+    net: u64,
+    fee: u64,
+) -> Result<()> {
     if net > 0 {
         token::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.buyer_premium_account.to_account_info(),
-                    to: ctx.accounts.mm_premium_account.to_account_info(),
-                    authority: ctx.accounts.buyer.to_account_info(),
+                    from: ctx.accounts.mm_premium_account.to_account_info(),
+                    to: ctx.accounts.user_premium_account.to_account_info(),
+                    authority: ctx.accounts.settler_config.to_account_info(),
                 },
+                signer_seeds,
             ),
             net,
         )?;
     }
     if fee > 0 {
         token::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.buyer_premium_account.to_account_info(),
+                    from: ctx.accounts.mm_premium_account.to_account_info(),
                     to: ctx.accounts.treasury_account.to_account_info(),
-                    authority: ctx.accounts.buyer.to_account_info(),
+                    authority: ctx.accounts.settler_config.to_account_info(),
                 },
+                signer_seeds,
             ),
             fee,
         )?;
