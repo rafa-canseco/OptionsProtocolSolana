@@ -77,7 +77,8 @@ pub mod whitelist {
         let config = &ctx.accounts.config;
         require!(
             ctx.accounts.caller.key() == config.admin
-                || ctx.accounts.caller.key() == config.factory,
+                || (config.factory != Pubkey::default()
+                    && ctx.accounts.caller.key() == config.factory),
             WhitelistError::Unauthorized
         );
 

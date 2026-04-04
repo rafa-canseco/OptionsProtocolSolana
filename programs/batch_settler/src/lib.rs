@@ -327,6 +327,16 @@ pub mod batch_settler {
     pub fn redeem_for_mm(ctx: Context<RedeemForMM>, amount: u64) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
+
+        let clock = Clock::get()?;
+        require!(
+            clock.unix_timestamp >= ctx.accounts.otoken_info.expiry,
+            SettlerError::OptionNotExpired
+        );
+        require!(
+            ctx.accounts.otoken_info.expiry_price > 0,
+            SettlerError::ExpiryPriceNotSet
+        );
         let mm_bal = &ctx.accounts.maker_otoken_balance;
         require!(
             mm_bal.balance >= amount,
@@ -409,6 +419,10 @@ pub mod batch_settler {
             clock.unix_timestamp >= escape_time,
             SettlerError::EscapeNotReady
         );
+        require!(
+            ctx.accounts.otoken_info.expiry_price > 0,
+            SettlerError::ExpiryPriceNotSet
+        );
 
         let mm_bal = &ctx.accounts.maker_otoken_balance;
         require!(
@@ -479,6 +493,8 @@ pub mod batch_settler {
     /// Clear MM's custodied balance after emergency withdrawal.
     /// Uses VaultMM PDA to find the associated MM.
     pub fn clear_mm_balance_for_vault(ctx: Context<ClearMMBalance>) -> Result<()> {
+        require!(ctx.accounts.vault.settled, SettlerError::VaultNotSettled);
+
         let vault_mm = &ctx.accounts.vault_mm;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
 
@@ -506,6 +522,7 @@ pub mod batch_settler {
         jupiter_route_data: Vec<u8>,
     ) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
+        require!(contra_amount > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
 
         validate_itm(&ctx.accounts.otoken_info)?;
@@ -961,8 +978,13 @@ pub struct RedeemForMM<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
-    /// MM's collateral account (receives final payout)
-    #[account(mut)]
+    /// MM's collateral account — must be owned by the maker
+    #[account(
+        mut,
+        constraint = mm_collateral_account.owner
+            == maker_otoken_balance.maker
+            @ SettlerError::InvalidCustodyAccount,
+    )]
     pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
     pub pool_token_account: Box<Account<'info, TokenAccount>>,
@@ -1048,6 +1070,13 @@ pub struct ClearMMBalance<'info> {
         bump = vault_mm.bump,
     )]
     pub vault_mm: Account<'info, VaultMM>,
+
+    /// Vault must be settled before clearing MM balance
+    #[account(
+        constraint = vault.key() == vault_mm.vault
+            @ SettlerError::Unauthorized,
+    )]
+    pub vault: Account<'info, controller::Vault>,
 
     #[account(
         mut,
@@ -1281,6 +1310,8 @@ pub enum SettlerError {
     OptionNotITM,
     #[msg("Invalid Jupiter program")]
     InvalidJupiterProgram,
+    #[msg("Vault not yet settled")]
+    VaultNotSettled,
 }
 
 // ============================================================
