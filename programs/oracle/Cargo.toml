@@ -21,7 +21,7 @@ custom-panic = []
 
 [dependencies]
 anchor-lang = "0.32.1"
-# pyth-solana-receiver-sdk deferred to B1N-252 (borsh v1/v2 conflict with Solana SDK 2.x)
+# pyth-solana-receiver-sdk has dependency conflicts — using manual Pyth deserialization
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
