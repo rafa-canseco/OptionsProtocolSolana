@@ -969,7 +969,7 @@ describe("b1nary-options", () => {
       // payout = (100_000_000 * (200_000_000_000 - 180_000_000_000))
       //          / 10^10
       //        = (100_000_000 * 20_000_000_000) / 10^10
-      //        = 200_000
+      //        = 200_000_000
       // collateral_returned = 5_000_000_000 - 200_000_000 = 4_800_000_000
 
       const ownerCollateralAccount = await createAccount(
@@ -981,7 +981,7 @@ describe("b1nary-options", () => {
       );
 
       await controllerProgram.methods
-        .settleVault(new BN("180000000000"))
+        .settleVault()
         .accounts({
           config: configPda,
           vault: vaultPda,
@@ -989,7 +989,7 @@ describe("b1nary-options", () => {
           poolTokenAccount: poolTokenAccount,
           ownerTokenAccount: ownerCollateralAccount,
           poolVaultAuthority: poolVaultAuthPda,
-          settler: admin.publicKey,
+          admin: admin.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .rpc();
@@ -1030,7 +1030,7 @@ describe("b1nary-options", () => {
 
       try {
         await controllerProgram.methods
-          .settleVault(new BN("180000000000"))
+          .settleVault()
           .accounts({
             config: configPda,
             vault: vaultPda,
@@ -1038,7 +1038,7 @@ describe("b1nary-options", () => {
             poolTokenAccount: poolTokenAccount,
             ownerTokenAccount: dummyOwnerAcct,
             poolVaultAuthority: poolVaultAuthPda,
-            settler: admin.publicKey,
+            admin: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();

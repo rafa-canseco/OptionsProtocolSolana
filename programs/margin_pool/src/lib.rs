@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{
-    self, Mint, Token, TokenAccount, Transfer,
-};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 declare_id!("Hp7XDp9USyoid2f7cJKPxmDrvHM2D8izeeGzkViPiy5r");
 
@@ -9,10 +7,7 @@ declare_id!("Hp7XDp9USyoid2f7cJKPxmDrvHM2D8izeeGzkViPiy5r");
 pub mod margin_pool {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        controller: Pubkey,
-    ) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, controller: Pubkey) -> Result<()> {
         require!(
             controller != Pubkey::default(),
             MarginPoolError::ZeroAddress
@@ -28,18 +23,13 @@ pub mod margin_pool {
         Ok(())
     }
 
-    pub fn create_pool_vault(
-        ctx: Context<CreatePoolVault>,
-    ) -> Result<()> {
+    pub fn create_pool_vault(ctx: Context<CreatePoolVault>) -> Result<()> {
         let pool_vault = &mut ctx.accounts.pool_vault;
-        pool_vault.collateral_mint =
-            ctx.accounts.collateral_mint.key();
-        pool_vault.token_account =
-            ctx.accounts.vault_token_account.key();
+        pool_vault.collateral_mint = ctx.accounts.collateral_mint.key();
+        pool_vault.token_account = ctx.accounts.vault_token_account.key();
         pool_vault.total_deposited = 0;
         pool_vault.bump = ctx.bumps.pool_vault;
-        pool_vault.token_account_bump =
-            ctx.bumps.vault_authority;
+        pool_vault.vault_authority_bump = ctx.bumps.vault_authority;
         emit!(PoolVaultCreated {
             collateral_mint: pool_vault.collateral_mint,
         });
@@ -47,29 +37,16 @@ pub mod margin_pool {
     }
 
     /// Transfer collateral from user to pool.
-    /// Only callable by the Controller program via CPI.
-    pub fn transfer_to_pool(
-        ctx: Context<TransferToPool>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn transfer_to_pool(ctx: Context<TransferToPool>, amount: u64) -> Result<()> {
         require!(amount > 0, MarginPoolError::ZeroAmount);
 
         token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx
-                        .accounts
-                        .user_token_account
-                        .to_account_info(),
-                    to: ctx
-                        .accounts
-                        .vault_token_account
-                        .to_account_info(),
-                    authority: ctx
-                        .accounts
-                        .user_authority
-                        .to_account_info(),
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.vault_token_account.to_account_info(),
+                    authority: ctx.accounts.user_authority.to_account_info(),
                 },
             ),
             amount,
@@ -90,11 +67,7 @@ pub mod margin_pool {
     }
 
     /// Transfer collateral from pool back to user.
-    /// Only callable by the Controller program via CPI.
-    pub fn transfer_to_user(
-        ctx: Context<TransferToUser>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn transfer_to_user(ctx: Context<TransferToUser>, amount: u64) -> Result<()> {
         require!(amount > 0, MarginPoolError::ZeroAmount);
 
         let pool_vault = &mut ctx.accounts.pool_vault;
@@ -107,7 +80,7 @@ pub mod margin_pool {
         let seeds = &[
             b"pool_vault_auth".as_ref(),
             mint_key.as_ref(),
-            &[pool_vault.token_account_bump],
+            &[pool_vault.vault_authority_bump],
         ];
         let signer_seeds = &[&seeds[..]];
 
@@ -115,18 +88,9 @@ pub mod margin_pool {
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 Transfer {
-                    from: ctx
-                        .accounts
-                        .vault_token_account
-                        .to_account_info(),
-                    to: ctx
-                        .accounts
-                        .user_token_account
-                        .to_account_info(),
-                    authority: ctx
-                        .accounts
-                        .vault_authority
-                        .to_account_info(),
+                    from: ctx.accounts.vault_token_account.to_account_info(),
+                    to: ctx.accounts.user_token_account.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -146,10 +110,7 @@ pub mod margin_pool {
         Ok(())
     }
 
-    pub fn set_controller(
-        ctx: Context<AdminOnly>,
-        new_controller: Pubkey,
-    ) -> Result<()> {
+    pub fn set_controller(ctx: Context<AdminOnly>, new_controller: Pubkey) -> Result<()> {
         require!(
             new_controller != Pubkey::default(),
             MarginPoolError::ZeroAddress
@@ -174,7 +135,7 @@ pub struct PoolVault {
     pub token_account: Pubkey,
     pub total_deposited: u64,
     pub bump: u8,
-    pub token_account_bump: u8,
+    pub vault_authority_bump: u8,
 }
 
 #[derive(Accounts)]

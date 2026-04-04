@@ -6,10 +6,7 @@ declare_id!("F759VGDWkcxjjGByWZTTdDKJwj1RFzH2VHZS3p4VXnts");
 pub mod whitelist {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<InitializeWhitelist>,
-        admin: Pubkey,
-    ) -> Result<()> {
+    pub fn initialize(ctx: Context<InitializeWhitelist>, admin: Pubkey) -> Result<()> {
         let config = &mut ctx.accounts.config;
         config.admin = admin;
         msg!("Whitelist initialized");
@@ -62,9 +59,7 @@ pub mod whitelist {
     }
 }
 
-#[derive(
-    AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq,
-)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq)]
 pub enum AssetType {
     Underlying,
     Collateral,

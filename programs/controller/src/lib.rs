@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{
-    self, Burn, Mint, MintTo, Token, TokenAccount,
-};
+use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
 
 declare_id!("FH3z4BYRZMFU8YzpJoFXUbrdoYksdERnWbZvDAEc3qcC");
 
@@ -9,14 +7,8 @@ declare_id!("FH3z4BYRZMFU8YzpJoFXUbrdoYksdERnWbZvDAEc3qcC");
 pub mod controller {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<InitializeConfig>,
-        admin: Pubkey,
-    ) -> Result<()> {
-        require!(
-            admin != Pubkey::default(),
-            ControllerError::ZeroAddress
-        );
+    pub fn initialize(ctx: Context<InitializeConfig>, admin: Pubkey) -> Result<()> {
+        require!(admin != Pubkey::default(), ControllerError::ZeroAddress);
         let config = &mut ctx.accounts.config;
         config.admin = admin;
         config.partial_pauser = Pubkey::default();
@@ -27,9 +19,7 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn initialize_counter(
-        ctx: Context<InitializeCounter>,
-    ) -> Result<()> {
+    pub fn initialize_counter(ctx: Context<InitializeCounter>) -> Result<()> {
         let counter = &mut ctx.accounts.vault_counter;
         counter.owner = ctx.accounts.owner.key();
         counter.next_id = 0;
@@ -37,18 +27,12 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn open_vault(
-        ctx: Context<OpenVault>,
-        collateral_mint: Pubkey,
-    ) -> Result<()> {
+    pub fn open_vault(ctx: Context<OpenVault>, collateral_mint: Pubkey) -> Result<()> {
         let config = &ctx.accounts.config;
+        require!(!config.fully_paused, ControllerError::SystemFullyPaused);
         require!(
             !config.partially_paused,
             ControllerError::SystemPartiallyPaused
-        );
-        require!(
-            !config.fully_paused,
-            ControllerError::SystemFullyPaused
         );
 
         let counter = &mut ctx.accounts.vault_counter;
@@ -76,15 +60,9 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn deposit_collateral(
-        ctx: Context<DepositCollateral>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn deposit_collateral(ctx: Context<DepositCollateral>, amount: u64) -> Result<()> {
         let config = &ctx.accounts.config;
-        require!(
-            !config.fully_paused,
-            ControllerError::SystemFullyPaused
-        );
+        require!(!config.fully_paused, ControllerError::SystemFullyPaused);
         require!(
             !config.partially_paused,
             ControllerError::SystemPartiallyPaused
@@ -94,8 +72,7 @@ pub mod controller {
         let vault = &mut ctx.accounts.vault;
         require!(!vault.settled, ControllerError::VaultSettled);
         require!(
-            ctx.accounts.user_token_account.mint
-                == vault.collateral_mint,
+            ctx.accounts.user_token_account.mint == vault.collateral_mint,
             ControllerError::CollateralMismatch
         );
 
@@ -103,18 +80,9 @@ pub mod controller {
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
                 anchor_spl::token::Transfer {
-                    from: ctx
-                        .accounts
-                        .user_token_account
-                        .to_account_info(),
-                    to: ctx
-                        .accounts
-                        .pool_token_account
-                        .to_account_info(),
-                    authority: ctx
-                        .accounts
-                        .owner
-                        .to_account_info(),
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.pool_token_account.to_account_info(),
+                    authority: ctx.accounts.owner.to_account_info(),
                 },
             ),
             amount,
@@ -134,18 +102,12 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn mint_otoken(
-        ctx: Context<MintOtoken>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn mint_otoken(ctx: Context<MintOtoken>, amount: u64) -> Result<()> {
         let config = &ctx.accounts.config;
+        require!(!config.fully_paused, ControllerError::SystemFullyPaused);
         require!(
             !config.partially_paused,
             ControllerError::SystemPartiallyPaused
-        );
-        require!(
-            !config.fully_paused,
-            ControllerError::SystemFullyPaused
         );
         require!(amount > 0, ControllerError::ZeroAmount);
 
@@ -180,26 +142,16 @@ pub mod controller {
         );
 
         let config_bump = config.bump;
-        let seeds =
-            &[b"controller_config".as_ref(), &[config_bump]];
+        let seeds = &[b"controller_config".as_ref(), &[config_bump]];
         let signer_seeds = &[&seeds[..]];
 
         token::mint_to(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 MintTo {
-                    mint: ctx
-                        .accounts
-                        .otoken_mint
-                        .to_account_info(),
-                    to: ctx
-                        .accounts
-                        .destination
-                        .to_account_info(),
-                    authority: ctx
-                        .accounts
-                        .config
-                        .to_account_info(),
+                    mint: ctx.accounts.otoken_mint.to_account_info(),
+                    to: ctx.accounts.destination.to_account_info(),
+                    authority: ctx.accounts.config.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -217,33 +169,19 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn settle_vault(
-        ctx: Context<SettleVault>,
-        expiry_price: u64,
-    ) -> Result<()> {
+    pub fn settle_vault(ctx: Context<SettleVault>) -> Result<()> {
         let config = &ctx.accounts.config;
-        require!(
-            !config.fully_paused,
-            ControllerError::SystemFullyPaused
-        );
+        require!(!config.fully_paused, ControllerError::SystemFullyPaused);
 
         // Read values before mutable borrow
         let vault_ref = &ctx.accounts.vault;
-        require!(
-            !vault_ref.settled,
-            ControllerError::VaultSettled
-        );
-        require!(
-            vault_ref.short_amount > 0,
-            ControllerError::EmptyVault
-        );
+        require!(!vault_ref.settled, ControllerError::VaultSettled);
+        require!(vault_ref.short_amount > 0, ControllerError::EmptyVault);
         let short_amount = vault_ref.short_amount;
         let collateral_amount = vault_ref.collateral_amount;
         let collateral_mint = vault_ref.collateral_mint;
         let vault_owner = vault_ref.owner;
         let vault_id = vault_ref.vault_id;
-        let pool_auth_bump =
-            ctx.accounts.pool_vault_authority_bump();
 
         let otoken_info = &ctx.accounts.otoken_info;
         let clock = Clock::get()?;
@@ -251,6 +189,9 @@ pub mod controller {
             clock.unix_timestamp >= otoken_info.expiry,
             ControllerError::NotExpired
         );
+
+        let expiry_price = otoken_info.expiry_price;
+        require!(expiry_price > 0, ControllerError::ExpiryPriceNotSet);
 
         let payout = get_payout(
             otoken_info.strike_price,
@@ -265,6 +206,7 @@ pub mod controller {
             .ok_or(ControllerError::MathOverflow)?;
 
         if collateral_returned > 0 {
+            let pool_auth_bump = ctx.bumps.pool_vault_authority;
             let seeds = &[
                 b"pool_vault_auth".as_ref(),
                 collateral_mint.as_ref(),
@@ -274,22 +216,11 @@ pub mod controller {
 
             token::transfer(
                 CpiContext::new_with_signer(
-                    ctx.accounts
-                        .token_program
-                        .to_account_info(),
+                    ctx.accounts.token_program.to_account_info(),
                     anchor_spl::token::Transfer {
-                        from: ctx
-                            .accounts
-                            .pool_token_account
-                            .to_account_info(),
-                        to: ctx
-                            .accounts
-                            .owner_token_account
-                            .to_account_info(),
-                        authority: ctx
-                            .accounts
-                            .pool_vault_authority
-                            .to_account_info(),
+                        from: ctx.accounts.pool_token_account.to_account_info(),
+                        to: ctx.accounts.owner_token_account.to_account_info(),
+                        authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
                 ),
@@ -309,15 +240,9 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn redeem(
-        ctx: Context<Redeem>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn redeem(ctx: Context<Redeem>, amount: u64) -> Result<()> {
         let config = &ctx.accounts.config;
-        require!(
-            !config.fully_paused,
-            ControllerError::SystemFullyPaused
-        );
+        require!(!config.fully_paused, ControllerError::SystemFullyPaused);
         require!(amount > 0, ControllerError::ZeroAmount);
 
         let otoken_info = &ctx.accounts.otoken_info;
@@ -328,10 +253,7 @@ pub mod controller {
         );
 
         let expiry_price = otoken_info.expiry_price;
-        require!(
-            expiry_price > 0,
-            ControllerError::ExpiryPriceNotSet
-        );
+        require!(expiry_price > 0, ControllerError::ExpiryPriceNotSet);
 
         let payout = get_payout(
             otoken_info.strike_price,
@@ -345,51 +267,31 @@ pub mod controller {
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
                 Burn {
-                    mint: ctx
-                        .accounts
-                        .otoken_mint
-                        .to_account_info(),
-                    from: ctx
-                        .accounts
-                        .redeemer_otoken_account
-                        .to_account_info(),
-                    authority: ctx
-                        .accounts
-                        .redeemer
-                        .to_account_info(),
+                    mint: ctx.accounts.otoken_mint.to_account_info(),
+                    from: ctx.accounts.redeemer_otoken_account.to_account_info(),
+                    authority: ctx.accounts.redeemer.to_account_info(),
                 },
             ),
             amount,
         )?;
 
         if payout > 0 {
-            let mint_key =
-                ctx.accounts.pool_token_account.mint;
+            let mint_key = ctx.accounts.pool_token_account.mint;
+            let pool_auth_bump = ctx.bumps.pool_vault_authority;
             let seeds = &[
                 b"pool_vault_auth".as_ref(),
                 mint_key.as_ref(),
-                &[ctx.accounts.pool_vault_authority_bump()],
+                &[pool_auth_bump],
             ];
             let signer_seeds = &[&seeds[..]];
 
             token::transfer(
                 CpiContext::new_with_signer(
-                    ctx.accounts
-                        .token_program
-                        .to_account_info(),
+                    ctx.accounts.token_program.to_account_info(),
                     anchor_spl::token::Transfer {
-                        from: ctx
-                            .accounts
-                            .pool_token_account
-                            .to_account_info(),
-                        to: ctx
-                            .accounts
-                            .redeemer_collateral_account
-                            .to_account_info(),
-                        authority: ctx
-                            .accounts
-                            .pool_vault_authority
-                            .to_account_info(),
+                        from: ctx.accounts.pool_token_account.to_account_info(),
+                        to: ctx.accounts.redeemer_collateral_account.to_account_info(),
+                        authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
                 ),
@@ -406,18 +308,13 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn set_partial_pauser(
-        ctx: Context<AdminAction>,
-        pauser: Pubkey,
-    ) -> Result<()> {
+    pub fn set_partial_pauser(ctx: Context<AdminAction>, pauser: Pubkey) -> Result<()> {
+        require!(pauser != Pubkey::default(), ControllerError::ZeroAddress);
         ctx.accounts.config.partial_pauser = pauser;
         Ok(())
     }
 
-    pub fn set_partially_paused(
-        ctx: Context<PauseAction>,
-        paused: bool,
-    ) -> Result<()> {
+    pub fn set_partially_paused(ctx: Context<PauseAction>, paused: bool) -> Result<()> {
         ctx.accounts.config.partially_paused = paused;
         if paused {
             emit!(SystemPartiallyPaused {
@@ -427,10 +324,7 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn set_fully_paused(
-        ctx: Context<AdminAction>,
-        paused: bool,
-    ) -> Result<()> {
+    pub fn set_fully_paused(ctx: Context<AdminAction>, paused: bool) -> Result<()> {
         ctx.accounts.config.fully_paused = paused;
         if paused {
             emit!(SystemFullyPaused {
@@ -440,6 +334,7 @@ pub mod controller {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_otoken_info(
         ctx: Context<CreateOTokenInfo>,
         otoken_mint: Pubkey,
@@ -451,6 +346,8 @@ pub mod controller {
         is_put: bool,
         collateral_decimals: u8,
     ) -> Result<()> {
+        require!(strike_price > 0, ControllerError::ZeroAmount);
+        require!(collateral_decimals <= 18, ControllerError::InvalidDecimals);
         let info = &mut ctx.accounts.otoken_info;
         info.otoken_mint = otoken_mint;
         info.underlying = underlying;
@@ -464,11 +361,12 @@ pub mod controller {
         Ok(())
     }
 
-    pub fn set_expiry_price(
-        ctx: Context<SetExpiryPrice>,
-        price: u64,
-    ) -> Result<()> {
+    pub fn set_expiry_price(ctx: Context<SetExpiryPrice>, price: u64) -> Result<()> {
         require!(price > 0, ControllerError::ZeroAmount);
+        require!(
+            ctx.accounts.otoken_info.expiry_price == 0,
+            ControllerError::ExpiryPriceAlreadySet
+        );
         ctx.accounts.otoken_info.expiry_price = price;
         Ok(())
     }
@@ -535,28 +433,25 @@ fn get_required_collateral(
         let numerator = (amount as u128)
             .checked_mul(strike_price as u128)
             .ok_or(ControllerError::MathOverflow)?;
-        let base: u128 = 10u128.pow(
-            (8 + 8 - collateral_decimals as u32) as u32,
-        );
+        let base: u128 = 10u128.pow(8 + 8 - collateral_decimals as u32);
         let result = numerator
             .checked_div(base)
             .ok_or(ControllerError::MathOverflow)?;
-        Ok(result as u64)
+        let result_u64: u64 = result
+            .try_into()
+            .map_err(|_| ControllerError::MathOverflow)?;
+        Ok(result_u64)
     } else {
         // Call: required = amount (1:1 in underlying terms)
         // Adjust for decimal difference
         let base_decimals: u32 = 8;
         if collateral_decimals as u32 >= base_decimals {
-            let factor = 10u64.pow(
-                collateral_decimals as u32 - base_decimals,
-            );
+            let factor = 10u64.pow(collateral_decimals as u32 - base_decimals);
             amount
                 .checked_mul(factor)
                 .ok_or(ControllerError::MathOverflow.into())
         } else {
-            let factor = 10u64.pow(
-                base_decimals - collateral_decimals as u32,
-            );
+            let factor = 10u64.pow(base_decimals - collateral_decimals as u32);
             amount
                 .checked_div(factor)
                 .ok_or(ControllerError::MathOverflow.into())
@@ -580,36 +475,33 @@ fn get_payout(
         let numerator = (amount as u128)
             .checked_mul(price_diff as u128)
             .ok_or(ControllerError::MathOverflow)?;
-        let base: u128 = 10u128.pow(
-            (8 + 8 - collateral_decimals as u32) as u32,
-        );
+        let base: u128 = 10u128.pow(8 + 8 - collateral_decimals as u32);
         let result = numerator
             .checked_div(base)
             .ok_or(ControllerError::MathOverflow)?;
-        Ok(result as u64)
+        let result_u64: u64 = result
+            .try_into()
+            .map_err(|_| ControllerError::MathOverflow)?;
+        Ok(result_u64)
     } else {
         // ITM if expiry_price > strike_price
         if expiry_price <= strike_price {
             return Ok(0);
         }
-        // Payout = amount (full collateral for calls)
-        // Capped at collateral_amount in settle_vault
-        let base_decimals: u32 = 8;
-        if collateral_decimals as u32 >= base_decimals {
-            let factor = 10u64.pow(
-                collateral_decimals as u32 - base_decimals,
-            );
-            amount
-                .checked_mul(factor)
-                .ok_or(ControllerError::MathOverflow.into())
-        } else {
-            let factor = 10u64.pow(
-                base_decimals - collateral_decimals as u32,
-            );
-            amount
-                .checked_div(factor)
-                .ok_or(ControllerError::MathOverflow.into())
-        }
+        // Call payout proportional to price difference,
+        // mirroring put logic: payout = amount * (expiry - strike) / 10^base
+        let price_diff = expiry_price - strike_price;
+        let numerator = (amount as u128)
+            .checked_mul(price_diff as u128)
+            .ok_or(ControllerError::MathOverflow)?;
+        let base: u128 = 10u128.pow(8 + 8 - collateral_decimals as u32);
+        let result = numerator
+            .checked_div(base)
+            .ok_or(ControllerError::MathOverflow)?;
+        let result_u64: u64 = result
+            .try_into()
+            .map_err(|_| ControllerError::MathOverflow)?;
+        Ok(result_u64)
     }
 }
 
@@ -687,11 +579,25 @@ pub struct DepositCollateral<'info> {
         bump = config.bump,
     )]
     pub config: Account<'info, ControllerConfig>,
-    #[account(mut, has_one = owner)]
+    #[account(
+        mut,
+        has_one = owner,
+        seeds = [
+            b"vault",
+            owner.key().as_ref(),
+            vault.vault_id.to_le_bytes().as_ref(),
+        ],
+        bump = vault.bump,
+    )]
     pub vault: Account<'info, Vault>,
     #[account(mut)]
     pub user_token_account: Account<'info, TokenAccount>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = pool_token_account.mint
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
     pub pool_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -707,6 +613,16 @@ pub struct MintOtoken<'info> {
     pub config: Account<'info, ControllerConfig>,
     #[account(mut, has_one = owner)]
     pub vault: Account<'info, Vault>,
+    #[account(
+        constraint = otoken_info.collateral_mint
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+        seeds = [
+            b"otoken_info",
+            otoken_mint.key().as_ref(),
+        ],
+        bump,
+    )]
     pub otoken_info: Account<'info, OTokenInfo>,
     #[account(
         mut,
@@ -714,7 +630,12 @@ pub struct MintOtoken<'info> {
             == otoken_info.otoken_mint,
     )]
     pub otoken_mint: Account<'info, Mint>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = destination.mint
+            == otoken_mint.key()
+            @ ControllerError::OtokenMismatch,
+    )]
     pub destination: Account<'info, TokenAccount>,
     #[account(mut)]
     pub owner: Signer<'info>,
@@ -726,33 +647,53 @@ pub struct SettleVault<'info> {
     #[account(
         seeds = [b"controller_config"],
         bump = config.bump,
+        has_one = admin,
     )]
     pub config: Account<'info, ControllerConfig>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [
+            b"vault",
+            vault.owner.as_ref(),
+            vault.vault_id.to_le_bytes().as_ref(),
+        ],
+        bump = vault.bump,
+    )]
     pub vault: Account<'info, Vault>,
+    #[account(
+        constraint = otoken_info.otoken_mint
+            == vault.otoken_mint
+            @ ControllerError::OtokenMismatch,
+        seeds = [
+            b"otoken_info",
+            vault.otoken_mint.as_ref(),
+        ],
+        bump,
+    )]
     pub otoken_info: Account<'info, OTokenInfo>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = pool_token_account.mint
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+        constraint = pool_token_account.owner
+            == pool_vault_authority.key()
+            @ ControllerError::Unauthorized,
+    )]
     pub pool_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub owner_token_account: Account<'info, TokenAccount>,
-    /// CHECK: PDA authority for pool vault
+    /// CHECK: PDA authority for pool vault, validated by seeds
+    #[account(
+        seeds = [
+            b"pool_vault_auth",
+            vault.collateral_mint.as_ref(),
+        ],
+        bump,
+    )]
     pub pool_vault_authority: AccountInfo<'info>,
-    pub settler: Signer<'info>,
+    pub admin: Signer<'info>,
     pub token_program: Program<'info, Token>,
-}
-
-impl SettleVault<'_> {
-    pub fn pool_vault_authority_bump(&self) -> u8 {
-        let mint_key = self.vault.collateral_mint;
-        let (_, bump) = Pubkey::find_program_address(
-            &[
-                b"pool_vault_auth",
-                mint_key.as_ref(),
-            ],
-            &crate::id(),
-        );
-        bump
-    }
 }
 
 #[derive(Accounts)]
@@ -762,6 +703,13 @@ pub struct Redeem<'info> {
         bump = config.bump,
     )]
     pub config: Account<'info, ControllerConfig>,
+    #[account(
+        seeds = [
+            b"otoken_info",
+            otoken_mint.key().as_ref(),
+        ],
+        bump,
+    )]
     pub otoken_info: Account<'info, OTokenInfo>,
     #[account(
         mut,
@@ -775,30 +723,35 @@ pub struct Redeem<'info> {
             == otoken_mint.key(),
     )]
     pub redeemer_otoken_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub redeemer_collateral_account:
-        Account<'info, TokenAccount>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = redeemer_collateral_account.mint
+            == otoken_info.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub redeemer_collateral_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        constraint = pool_token_account.mint
+            == otoken_info.collateral_mint
+            @ ControllerError::CollateralMismatch,
+        constraint = pool_token_account.owner
+            == pool_vault_authority.key()
+            @ ControllerError::Unauthorized,
+    )]
     pub pool_token_account: Account<'info, TokenAccount>,
-    /// CHECK: PDA authority for pool vault
+    /// CHECK: PDA authority for pool vault, validated by seeds
+    #[account(
+        seeds = [
+            b"pool_vault_auth",
+            otoken_info.collateral_mint.as_ref(),
+        ],
+        bump,
+    )]
     pub pool_vault_authority: AccountInfo<'info>,
     #[account(mut)]
     pub redeemer: Signer<'info>,
     pub token_program: Program<'info, Token>,
-}
-
-impl Redeem<'_> {
-    pub fn pool_vault_authority_bump(&self) -> u8 {
-        let mint_key = self.pool_token_account.mint;
-        let (_, bump) = Pubkey::find_program_address(
-            &[
-                b"pool_vault_auth",
-                mint_key.as_ref(),
-            ],
-            &crate::id(),
-        );
-        bump
-    }
 }
 
 #[derive(Accounts)]
@@ -835,7 +788,14 @@ pub struct SetExpiryPrice<'info> {
         has_one = admin,
     )]
     pub config: Account<'info, ControllerConfig>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [
+            b"otoken_info",
+            otoken_info.otoken_mint.as_ref(),
+        ],
+        bump,
+    )]
     pub otoken_info: Account<'info, OTokenInfo>,
     pub admin: Signer<'info>,
 }
@@ -947,4 +907,8 @@ pub enum ControllerError {
     Unauthorized,
     #[msg("Arithmetic overflow")]
     MathOverflow,
+    #[msg("Expiry price already set")]
+    ExpiryPriceAlreadySet,
+    #[msg("Invalid collateral decimals")]
+    InvalidDecimals,
 }

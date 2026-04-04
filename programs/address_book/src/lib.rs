@@ -6,14 +6,8 @@ declare_id!("4gJ1QmshidSWf3qqJk7pnythWtMtdpR4robr15oL3JUb");
 pub mod address_book {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        admin: Pubkey,
-    ) -> Result<()> {
-        require!(
-            admin != Pubkey::default(),
-            AddressBookError::ZeroAddress
-        );
+    pub fn initialize(ctx: Context<Initialize>, admin: Pubkey) -> Result<()> {
+        require!(admin != Pubkey::default(), AddressBookError::ZeroAddress);
         let registry = &mut ctx.accounts.registry;
         registry.admin = admin;
         registry.pending_admin = Pubkey::default();
@@ -22,15 +16,8 @@ pub mod address_book {
         Ok(())
     }
 
-    pub fn set_address(
-        ctx: Context<SetAddress>,
-        key: AddressKey,
-        address: Pubkey,
-    ) -> Result<()> {
-        require!(
-            address != Pubkey::default(),
-            AddressBookError::ZeroAddress
-        );
+    pub fn set_address(ctx: Context<SetAddress>, key: AddressKey, address: Pubkey) -> Result<()> {
+        require!(address != Pubkey::default(), AddressBookError::ZeroAddress);
         let registry = &mut ctx.accounts.registry;
         let old = match key {
             AddressKey::Controller => {
@@ -72,10 +59,7 @@ pub mod address_book {
         Ok(())
     }
 
-    pub fn transfer_ownership(
-        ctx: Context<SetAddress>,
-        new_admin: Pubkey,
-    ) -> Result<()> {
+    pub fn transfer_ownership(ctx: Context<SetAddress>, new_admin: Pubkey) -> Result<()> {
         require!(
             new_admin != Pubkey::default(),
             AddressBookError::ZeroAddress
@@ -89,9 +73,7 @@ pub mod address_book {
         Ok(())
     }
 
-    pub fn accept_ownership(
-        ctx: Context<AcceptOwnership>,
-    ) -> Result<()> {
+    pub fn accept_ownership(ctx: Context<AcceptOwnership>) -> Result<()> {
         let registry = &mut ctx.accounts.registry;
         let old_admin = registry.admin;
         registry.admin = registry.pending_admin;
@@ -118,9 +100,7 @@ pub struct Registry {
     pub bump: u8,
 }
 
-#[derive(
-    AnchorSerialize, AnchorDeserialize, Clone, Debug,
-)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub enum AddressKey {
     Controller,
     MarginPool,
