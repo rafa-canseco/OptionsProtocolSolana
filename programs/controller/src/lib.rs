@@ -674,18 +674,6 @@ pub struct MintOtoken<'info> {
             @ ControllerError::OtokenMismatch,
     )]
     pub destination: Account<'info, TokenAccount>,
-    /// Whitelist entry proves this oToken was whitelisted.
-    /// Cross-program PDA validation (owned by whitelist program).
-    #[account(
-        seeds = [b"whitelisted_otoken", otoken_mint.key().as_ref()],
-        bump = whitelisted_otoken.bump,
-        seeds::program = whitelist_program.key(),
-        constraint = whitelisted_otoken.active
-            @ ControllerError::OTokenNotWhitelisted,
-    )]
-    pub whitelisted_otoken: Account<'info, whitelist::WhitelistedOToken>,
-    pub whitelist_program: Program<'info, whitelist::program::Whitelist>,
-
     #[account(mut)]
     pub owner: Signer<'info>,
     pub token_program: Program<'info, Token>,
@@ -832,6 +820,16 @@ pub struct CreateOTokenInfo<'info> {
     pub otoken_info: Account<'info, OTokenInfo>,
     /// CHECK: oToken mint address used as PDA seed
     pub otoken_mint: AccountInfo<'info>,
+    /// Whitelist entry proves this oToken is approved.
+    #[account(
+        seeds = [b"whitelisted_otoken", otoken_mint.key().as_ref()],
+        bump = whitelisted_otoken.bump,
+        seeds::program = whitelist_program.key(),
+        constraint = whitelisted_otoken.active
+            @ ControllerError::OTokenNotWhitelisted,
+    )]
+    pub whitelisted_otoken: Account<'info, whitelist::WhitelistedOToken>,
+    pub whitelist_program: Program<'info, whitelist::program::Whitelist>,
     #[account(mut)]
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,

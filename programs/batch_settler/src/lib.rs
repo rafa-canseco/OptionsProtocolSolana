@@ -906,12 +906,6 @@ pub struct ExecuteOrder<'info> {
     /// CHECK: Ed25519 signature verified via instruction introspection
     pub maker: AccountInfo<'info>,
 
-    /// Whitelist entry for oToken (cross-program PDA validation)
-    /// CHECK: Validated by controller CPI during mint_otoken
-    pub whitelisted_otoken: AccountInfo<'info>,
-    /// CHECK: Whitelist program for controller CPI
-    pub whitelist_program: AccountInfo<'info>,
-
     pub controller_program: Program<'info, ControllerProgram>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1063,19 +1057,19 @@ pub struct RedeemForMM<'info> {
         constraint = settler_otoken_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Account<'info, TokenAccount>,
+    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
     /// Settler's collateral account (receives redeem payout)
     #[account(
         mut,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_collateral_account: Account<'info, TokenAccount>,
+    pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
     /// MM's collateral account (receives final payout)
     #[account(mut)]
-    pub mm_collateral_account: Account<'info, TokenAccount>,
+    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
@@ -1123,17 +1117,17 @@ pub struct MMSelfRedeem<'info> {
         constraint = settler_otoken_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Account<'info, TokenAccount>,
+    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
     #[account(
         mut,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_collateral_account: Account<'info, TokenAccount>,
+    pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
-    pub mm_collateral_account: Account<'info, TokenAccount>,
+    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
@@ -1205,24 +1199,24 @@ pub struct PhysicalRedeem<'info> {
         constraint = settler_otoken_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Account<'info, TokenAccount>,
+    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
     /// Settler's collateral token account (receives redeem payout)
     #[account(
         mut,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_collateral_account: Account<'info, TokenAccount>,
+    pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
     /// Settler's contra-asset token account (has borrowed flash loan funds)
     #[account(
         mut,
         constraint = settler_contra_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_contra_account: Account<'info, TokenAccount>,
+    pub settler_contra_account: Box<Account<'info, TokenAccount>>,
     /// User receives contra-asset (physical delivery)
     #[account(mut)]
-    pub user_contra_account: Account<'info, TokenAccount>,
+    pub user_contra_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: User identity for event emission
     pub user: AccountInfo<'info>,
     /// MM receives surplus collateral
@@ -1591,8 +1585,6 @@ fn cpi_mint_otoken(
                 otoken_info: ctx.accounts.otoken_info.to_account_info(),
                 otoken_mint: ctx.accounts.otoken_mint.to_account_info(),
                 destination: ctx.accounts.settler_otoken_account.to_account_info(),
-                whitelisted_otoken: ctx.accounts.whitelisted_otoken.to_account_info(),
-                whitelist_program: ctx.accounts.whitelist_program.to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
                 token_program: ctx.accounts.token_program.to_account_info(),
             },
