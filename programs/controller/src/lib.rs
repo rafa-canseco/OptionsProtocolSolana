@@ -439,6 +439,39 @@ pub mod controller {
         }
         Ok(())
     }
+
+    pub fn create_otoken_info(
+        ctx: Context<CreateOTokenInfo>,
+        otoken_mint: Pubkey,
+        underlying: Pubkey,
+        strike_asset: Pubkey,
+        collateral_mint: Pubkey,
+        strike_price: u64,
+        expiry: i64,
+        is_put: bool,
+        collateral_decimals: u8,
+    ) -> Result<()> {
+        let info = &mut ctx.accounts.otoken_info;
+        info.otoken_mint = otoken_mint;
+        info.underlying = underlying;
+        info.strike_asset = strike_asset;
+        info.collateral_mint = collateral_mint;
+        info.strike_price = strike_price;
+        info.expiry = expiry;
+        info.is_put = is_put;
+        info.collateral_decimals = collateral_decimals;
+        info.expiry_price = 0;
+        Ok(())
+    }
+
+    pub fn set_expiry_price(
+        ctx: Context<SetExpiryPrice>,
+        price: u64,
+    ) -> Result<()> {
+        require!(price > 0, ControllerError::ZeroAmount);
+        ctx.accounts.otoken_info.expiry_price = price;
+        Ok(())
+    }
 }
 
 /// Collateral metadata for an oToken series.
@@ -766,6 +799,45 @@ impl Redeem<'_> {
         );
         bump
     }
+}
+
+#[derive(Accounts)]
+pub struct CreateOTokenInfo<'info> {
+    #[account(
+        seeds = [b"controller_config"],
+        bump = config.bump,
+        has_one = admin,
+    )]
+    pub config: Account<'info, ControllerConfig>,
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + 32 + 32 + 32 + 32 + 8 + 8 + 1 + 1 + 8,
+        seeds = [
+            b"otoken_info",
+            otoken_mint.key().as_ref(),
+        ],
+        bump,
+    )]
+    pub otoken_info: Account<'info, OTokenInfo>,
+    /// CHECK: oToken mint address used as PDA seed
+    pub otoken_mint: AccountInfo<'info>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetExpiryPrice<'info> {
+    #[account(
+        seeds = [b"controller_config"],
+        bump = config.bump,
+        has_one = admin,
+    )]
+    pub config: Account<'info, ControllerConfig>,
+    #[account(mut)]
+    pub otoken_info: Account<'info, OTokenInfo>,
+    pub admin: Signer<'info>,
 }
 
 #[derive(Accounts)]
