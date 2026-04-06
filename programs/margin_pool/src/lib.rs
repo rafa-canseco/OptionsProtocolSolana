@@ -200,6 +200,8 @@ pub mod margin_pool {
             MarginPoolError::InvalidKaminoProgram
         );
 
+        let balance_before = ctx.accounts.vault_token_account.amount;
+
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
         let seeds = &[b"pool_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
@@ -213,15 +215,21 @@ pub mod margin_pool {
             kamino_ix_data,
         )?;
 
+        // Verify actual tokens left the vault
+        ctx.accounts.vault_token_account.reload()?;
+        let actual_sent = balance_before
+            .checked_sub(ctx.accounts.vault_token_account.amount)
+            .ok_or(MarginPoolError::MathOverflow)?;
+
         let vault = &mut ctx.accounts.pool_vault;
         vault.total_in_lending = vault
             .total_in_lending
-            .checked_add(amount)
+            .checked_add(actual_sent)
             .ok_or(MarginPoolError::MathOverflow)?;
 
         emit!(SuppliedToLending {
             collateral_mint: vault.collateral_mint,
-            amount,
+            amount: actual_sent,
         });
         Ok(())
     }
@@ -240,6 +248,8 @@ pub mod margin_pool {
             MarginPoolError::InvalidKaminoProgram
         );
 
+        let balance_before = ctx.accounts.vault_token_account.amount;
+
         let vault = &ctx.accounts.pool_vault;
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
@@ -254,15 +264,24 @@ pub mod margin_pool {
             kamino_ix_data,
         )?;
 
+        // Verify actual tokens received
+        ctx.accounts.vault_token_account.reload()?;
+        let actual_received = ctx
+            .accounts
+            .vault_token_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(MarginPoolError::MathOverflow)?;
+
         let vault = &mut ctx.accounts.pool_vault;
         vault.total_in_lending = vault
             .total_in_lending
-            .checked_sub(amount)
+            .checked_sub(actual_received)
             .ok_or(MarginPoolError::MathOverflow)?;
 
         emit!(WithdrawnFromLending {
             collateral_mint: vault.collateral_mint,
-            amount,
+            amount: actual_received,
         });
         Ok(())
     }
@@ -276,6 +295,10 @@ pub mod margin_pool {
     ) -> Result<()> {
         require!(yield_amount > 0, MarginPoolError::ZeroAmount);
         require!(
+            ctx.accounts.pool_vault.lending_enabled,
+            MarginPoolError::LendingNotEnabled
+        );
+        require!(
             ctx.accounts.config.yield_recipient != Pubkey::default(),
             MarginPoolError::ZeroAddress
         );
@@ -285,6 +308,9 @@ pub mod margin_pool {
             kamino_program.key() == ctx.accounts.config.kamino_program,
             MarginPoolError::InvalidKaminoProgram
         );
+
+        // Snapshot balance before Kamino CPI
+        let balance_before = ctx.accounts.vault_token_account.amount;
 
         let vault = &ctx.accounts.pool_vault;
         let mint_key = vault.collateral_mint;
@@ -300,6 +326,19 @@ pub mod margin_pool {
             signer_seeds,
             kamino_ix_data,
         )?;
+
+        // Verify Kamino actually returned enough tokens
+        ctx.accounts.vault_token_account.reload()?;
+        let actual_received = ctx
+            .accounts
+            .vault_token_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(MarginPoolError::MathOverflow)?;
+        require!(
+            yield_amount <= actual_received,
+            MarginPoolError::InsufficientYield
+        );
 
         // 2. Transfer yield from vault → yield_recipient
         token::transfer(
@@ -324,10 +363,15 @@ pub mod margin_pool {
     }
 
     /// Owner drains all from Kamino and disables lending for vault.
+    /// Admin-only (not operator) — this is a destructive operation.
     pub fn drain_lending<'info>(
         ctx: Context<'_, '_, 'info, 'info, LendingOperation<'info>>,
         kamino_ix_data: Vec<u8>,
     ) -> Result<()> {
+        require!(
+            ctx.accounts.caller.key() == ctx.accounts.config.admin,
+            MarginPoolError::Unauthorized
+        );
         let vault = &ctx.accounts.pool_vault;
         require!(vault.total_in_lending > 0, MarginPoolError::ZeroAmount);
 
@@ -531,6 +575,8 @@ pub struct LendingOperation<'info> {
         bump = pool_vault.bump,
     )]
     pub pool_vault: Account<'info, PoolVault>,
+    #[account(mut, address = pool_vault.token_account)]
+    pub vault_token_account: Account<'info, TokenAccount>,
     /// CHECK: PDA authority for pool token account
     #[account(
         seeds = [b"pool_vault_auth", pool_vault.collateral_mint.as_ref()],
@@ -699,4 +745,6 @@ pub enum MarginPoolError {
     LendingNotConfigured,
     #[msg("Invalid Kamino program")]
     InvalidKaminoProgram,
+    #[msg("Yield amount exceeds actual Kamino return")]
+    InsufficientYield,
 }
