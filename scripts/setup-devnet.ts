@@ -386,11 +386,15 @@ async function main() {
   const connection = provider.connection;
 
   console.log("Admin:", admin.publicKey.toBase58());
-  console.log(
-    "Balance:",
-    (await connection.getBalance(admin.publicKey)) / LAMPORTS_PER_SOL,
-    "SOL"
-  );
+  const balance = await connection.getBalance(admin.publicKey);
+  const balSol = balance / LAMPORTS_PER_SOL;
+  console.log("Balance:", balSol, "SOL");
+  if (balSol < 0.5) {
+    throw new Error(
+      `Insufficient balance: ${balSol} SOL. Need >= 0.5 SOL for tx fees. ` +
+      `Run: solana airdrop 1 ${admin.publicKey.toBase58()} --url devnet`
+    );
+  }
 
   const programs = {
     addressBook: anchor.workspace.addressBook as Program<AddressBook>,
