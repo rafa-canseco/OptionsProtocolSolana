@@ -272,8 +272,15 @@ async function initMarginPool(
     [Buffer.from("margin_pool_config")],
     program.programId
   );
+  // Kamino Lend program on devnet (klend)
+  const KAMINO_PROGRAM = new PublicKey(
+    "KLend2g3cP87ber8gvpP8oqaEYAkvzVsSNBaFETqK72"
+  );
   await tryRpc("initialize", () =>
-    program.methods.initialize(controllerConfigPda).accounts({ admin }).rpc()
+    program.methods
+      .initialize(controllerConfigPda, admin, admin, KAMINO_PROGRAM)
+      .accounts({ admin })
+      .rpc()
   );
 
   const mints = [
