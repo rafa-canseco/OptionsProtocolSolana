@@ -87,6 +87,13 @@ pub mod margin_pool {
             MarginPoolError::InsufficientBalance
         );
 
+        // Ensure enough tokens are available (not locked in lending)
+        let available = pool_vault
+            .total_deposited
+            .checked_sub(pool_vault.total_in_lending)
+            .ok_or(MarginPoolError::MathOverflow)?;
+        require!(available >= amount, MarginPoolError::FundsInLending);
+
         let mint_key = pool_vault.collateral_mint;
         let seeds = &[
             b"pool_vault_auth".as_ref(),
@@ -583,7 +590,8 @@ pub struct LendingOperation<'info> {
         bump = pool_vault.vault_authority_bump,
     )]
     pub vault_authority: AccountInfo<'info>,
-    /// CHECK: Kamino program, validated against config
+    /// CHECK: Kamino program, validated against config + executable check
+    #[account(executable)]
     pub kamino_program: AccountInfo<'info>,
     #[account(mut)]
     pub caller: Signer<'info>,
@@ -621,7 +629,8 @@ pub struct HarvestYield<'info> {
             @ MarginPoolError::Unauthorized,
     )]
     pub yield_recipient_account: Box<Account<'info, TokenAccount>>,
-    /// CHECK: Kamino program
+    /// CHECK: Kamino program, validated against config
+    #[account(executable)]
     pub kamino_program: AccountInfo<'info>,
     #[account(mut)]
     pub caller: Signer<'info>,
@@ -747,4 +756,6 @@ pub enum MarginPoolError {
     InvalidKaminoProgram,
     #[msg("Yield amount exceeds actual Kamino return")]
     InsufficientYield,
+    #[msg("Funds locked in lending — withdraw from lending first")]
+    FundsInLending,
 }
