@@ -15,8 +15,6 @@ import {
   createInitializeMintInstruction,
   createInitializeAccountInstruction,
   createMintToInstruction,
-  getMinimumBalanceForRentExemptMint,
-  getMinimumBalanceForRentExemptAccount,
   MINT_SIZE,
   ACCOUNT_SIZE,
 } from "@solana/spl-token";
@@ -140,20 +138,12 @@ function findMakerOTokenBalancePda(
   );
 }
 
-function findVaultMMPda(vault: PublicKey, programId: PublicKey): PublicKey {
-  return findPda([Buffer.from("vault_mm"), vault.toBuffer()], programId);
-}
-
 function findWhitelistedOTokenPda(mint: PublicKey, programId: PublicKey): PublicKey {
   return findPda([Buffer.from("whitelisted_otoken"), mint.toBuffer()], programId);
 }
 
 function findPoolVaultAuthPda(mint: PublicKey, programId: PublicKey): PublicKey {
   return findPda([Buffer.from("pool_vault_auth"), mint.toBuffer()], programId);
-}
-
-function findMarginPoolConfigPda(programId: PublicKey): PublicKey {
-  return findPda([Buffer.from("margin_pool_config")], programId);
 }
 
 // ── Tests ─────────────────────────────────────────────────
@@ -185,7 +175,6 @@ describe("post-expiry instructions", () => {
   let mmCollateralAccount: PublicKey;
   let makerOTokenBalancePda: PublicKey;
 
-  const EXPIRY_TIME = new BN(1000); // relative to bankrun clock
   const STRIKE_PRICE = new BN("200000000000"); // $2000 in 8 decimals
   const ESCAPE_DELAY = new BN(259200); // 3 days
   const FEE_BPS = 500;
@@ -290,7 +279,6 @@ describe("post-expiry instructions", () => {
     poolTokenAccount = await bankrunCreateTokenAccount(context, admin, collateralMint, poolVaultAuthPda);
 
     // 8. Open vault, deposit collateral, mint oTokens (admin acts as vault owner)
-    const vaultCounterPda = findVaultCounterPda(admin.publicKey, controllerProgram.programId);
     const vaultPda = findVaultPda(admin.publicKey, new BN(0), controllerProgram.programId);
 
     await controllerProgram.methods
@@ -381,11 +369,6 @@ describe("post-expiry instructions", () => {
       .rpc();
 
     // Manually inject MakerOTokenBalance PDA (normally created by execute_order)
-    const mmBalDiscriminator = Buffer.from([
-      // Anchor discriminator for MakerOTokenBalance
-      // sha256("account:MakerOTokenBalance")[..8]
-    ]);
-    // Use Anchor's serialization by finding the bump
     const [, mmBalBump] = PublicKey.findProgramAddressSync(
       [Buffer.from("mm_balance"), maker.publicKey.toBuffer(), otokenMint.toBuffer()],
       batchSettlerProgram.programId
@@ -447,7 +430,9 @@ describe("post-expiry instructions", () => {
           .rpc();
         assert.fail("should reject non-admin");
       } catch (err: any) {
-        assert.ok(err.toString().length > 0);
+        // Bankrun may return account resolution error or ConstraintHasOne
+        if (err.message === "should reject non-admin") throw err;
+        assert.ok(err.toString().length > 0, "rejected non-admin");
       }
     });
 
@@ -563,7 +548,7 @@ describe("post-expiry instructions", () => {
           .rpc();
         assert.fail("should reject non-owner");
       } catch (err: any) {
-        assert.ok(err.toString().length > 0);
+        assert.include(err.toString(), "ConstraintHasOne");
       }
     });
   });
@@ -603,7 +588,7 @@ describe("post-expiry instructions", () => {
         assert.fail("should reject unauthorized");
       } catch (err: any) {
         assert.ok(
-          err.toString().includes("nauthorized") ||
+          err.toString().includes("Unauthorized") ||
           err.toString().includes("ConstraintRaw"),
           "should be unauthorized"
         );
