@@ -501,7 +501,12 @@ describe("b1nary-options", () => {
       const controllerPk = Keypair.generate().publicKey;
 
       await marginPoolProgram.methods
-        .initialize(controllerPk)
+        .initialize(
+          controllerPk,
+          admin.publicKey,              // operator
+          admin.publicKey,              // yield_recipient
+          Keypair.generate().publicKey   // kamino_program (dummy)
+        )
         .accounts({
           admin: admin.publicKey,
         })
