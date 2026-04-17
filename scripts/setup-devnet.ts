@@ -32,8 +32,7 @@ import { BatchSettler } from "../target/types/batch_settler";
 // ── Constants ─────────────────────────────────────────────
 const PYTH_FEEDS = {
   SOL_USD: "ef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d",
-  JUP_USD: "0a0408d619e9380abad35060f9192039ed5042fa6f82301d0e48bb52be830996",
-  XAU_USD: "765d2ba906dbc32ca17cc11f5310a89e9ee1f6420508c63861f2f8ba4ee34bb2",
+  TSLAX_USD: "47a156470288850a440df3a6ce85a55917b813a19bb5b31128a33a986566a362",
 };
 
 const PYTH_RECEIVER_PROGRAM = new PublicKey(
@@ -96,8 +95,7 @@ function findPda(seeds: Buffer[], programId: PublicKey): PublicKey {
 
 interface MockTokens {
   usdc: PublicKey;
-  jup: PublicKey;
-  xau: PublicKey;
+  tslax: PublicKey;
 }
 
 async function createMockTokens(
@@ -109,8 +107,7 @@ async function createMockTokens(
 
   const mints = [
     { seed: "b1nary-devnet-mock-usdc-v1", decimals: 6, name: "USDC" },
-    { seed: "b1nary-devnet-mock-jup-v1", decimals: 6, name: "JUP" },
-    { seed: "b1nary-devnet-mock-xau-v1", decimals: 8, name: "XAU" },
+    { seed: "b1nary-devnet-mock-tslax-v1", decimals: 8, name: "TSLAx" },
   ];
 
   const addresses: PublicKey[] = [];
@@ -118,7 +115,12 @@ async function createMockTokens(
     const kp = keypairFromSeed(m.seed);
     try {
       const mint = await createMint(
-        connection, payer, authority, null, m.decimals, kp
+        connection,
+        payer,
+        authority,
+        null,
+        m.decimals,
+        kp
       );
       console.log(`  ${m.name}: ${mint.toBase58()} (created)`);
       addresses.push(mint);
@@ -132,7 +134,7 @@ async function createMockTokens(
     }
   }
   console.log(`  wSOL: ${NATIVE_SOL_MINT.toBase58()} (native)`);
-  return { usdc: addresses[0], jup: addresses[1], xau: addresses[2] };
+  return { usdc: addresses[0], tslax: addresses[1] };
 }
 
 async function initAddressBook(
@@ -172,8 +174,7 @@ async function initWhitelist(
 
   const underlyings = [
     { mint: NATIVE_SOL_MINT, name: "SOL" },
-    { mint: tokens.jup, name: "JUP" },
-    { mint: tokens.xau, name: "XAU" },
+    { mint: tokens.tslax, name: "TSLAx" },
   ];
   for (const u of underlyings) {
     const sym = Array.from(Buffer.from(u.name.padEnd(8, "\0")));
@@ -192,12 +193,30 @@ async function initWhitelist(
   );
 
   const products = [
-    { underlying: NATIVE_SOL_MINT, collateral: tokens.usdc, isPut: true, name: "SOL-put" },
-    { underlying: NATIVE_SOL_MINT, collateral: NATIVE_SOL_MINT, isPut: false, name: "SOL-call" },
-    { underlying: tokens.jup, collateral: tokens.usdc, isPut: true, name: "JUP-put" },
-    { underlying: tokens.jup, collateral: tokens.jup, isPut: false, name: "JUP-call" },
-    { underlying: tokens.xau, collateral: tokens.usdc, isPut: true, name: "XAU-put" },
-    { underlying: tokens.xau, collateral: tokens.xau, isPut: false, name: "XAU-call" },
+    {
+      underlying: NATIVE_SOL_MINT,
+      collateral: tokens.usdc,
+      isPut: true,
+      name: "SOL-put",
+    },
+    {
+      underlying: NATIVE_SOL_MINT,
+      collateral: NATIVE_SOL_MINT,
+      isPut: false,
+      name: "SOL-call",
+    },
+    {
+      underlying: tokens.tslax,
+      collateral: tokens.usdc,
+      isPut: true,
+      name: "TSLAx-put",
+    },
+    {
+      underlying: tokens.tslax,
+      collateral: tokens.tslax,
+      isPut: false,
+      name: "TSLAx-call",
+    },
   ];
   for (const p of products) {
     const productPda = findPda(
@@ -227,17 +246,28 @@ async function initOracle(
   await tryRpc("initialize", () =>
     program.methods
       .initialize(
-        admin, admin, PYTH_RECEIVER_PROGRAM,
-        MAX_ORACLE_STALENESS, MAX_CONFIDENCE_BPS, PRICE_DEVIATION_BPS
+        admin,
+        admin,
+        PYTH_RECEIVER_PROGRAM,
+        MAX_ORACLE_STALENESS,
+        MAX_CONFIDENCE_BPS,
+        PRICE_DEVIATION_BPS
       )
       .accounts({ payer: admin })
       .rpc()
   );
 
   const feeds = [
-    { underlying: NATIVE_SOL_MINT, feedId: PYTH_FEEDS.SOL_USD, name: "SOL/USD" },
-    { underlying: tokens.jup, feedId: PYTH_FEEDS.JUP_USD, name: "JUP/USD" },
-    { underlying: tokens.xau, feedId: PYTH_FEEDS.XAU_USD, name: "XAU/USD" },
+    {
+      underlying: NATIVE_SOL_MINT,
+      feedId: PYTH_FEEDS.SOL_USD,
+      name: "SOL/USD",
+    },
+    {
+      underlying: tokens.tslax,
+      feedId: PYTH_FEEDS.TSLAX_USD,
+      name: "TSLAx/USD",
+    },
   ];
   for (const f of feeds) {
     await tryRpc(`feed(${f.name})`, () =>
@@ -249,10 +279,7 @@ async function initOracle(
   }
 }
 
-async function initController(
-  program: Program<Controller>,
-  admin: PublicKey
-) {
+async function initController(program: Program<Controller>, admin: PublicKey) {
   console.log("\n=== Initializing Controller ===");
   await tryRpc("initialize", () =>
     program.methods.initialize(admin).accounts({ payer: admin }).rpc()
@@ -285,8 +312,8 @@ async function initMarginPool(
 
   const mints = [
     { mint: tokens.usdc, seed: "b1nary-devnet-vault-usdc-v1" },
-    { mint: tokens.jup, seed: "b1nary-devnet-vault-jup-v1" },
-    { mint: tokens.xau, seed: "b1nary-devnet-vault-xau-v1" },
+    { mint: NATIVE_SOL_MINT, seed: "b1nary-devnet-vault-wsol-v1" },
+    { mint: tokens.tslax, seed: "b1nary-devnet-vault-tslax-v1" },
   ];
   for (const m of mints) {
     const poolVaultPda = findPda(
@@ -303,7 +330,11 @@ async function initMarginPool(
     let tokenAcctAddr = tokenAcctKp.publicKey;
     try {
       tokenAcctAddr = await createAccount(
-        connection, payer, m.mint, vaultAuthPda, tokenAcctKp
+        connection,
+        payer,
+        m.mint,
+        vaultAuthPda,
+        tokenAcctKp
       );
     } catch (e: any) {
       if (!e.toString().includes("already in use")) throw e;
@@ -336,10 +367,7 @@ async function initOtokenFactory(
     program.methods.initialize(admin).accounts({ payer: admin }).rpc()
   );
   await tryRpc("setController", () =>
-    program.methods
-      .setController(controllerConfigPda)
-      .accounts({ admin })
-      .rpc()
+    program.methods.setController(controllerConfigPda).accounts({ admin }).rpc()
   );
 }
 
@@ -353,17 +381,17 @@ async function initBatchSettler(
   await tryRpc("initialize", () =>
     program.methods
       .initialize(
-        admin, admin, PROTOCOL_FEE_BPS,
-        MIN_ESCAPE_DELAY, JUPITER_PROGRAM
+        admin,
+        admin,
+        PROTOCOL_FEE_BPS,
+        MIN_ESCAPE_DELAY,
+        JUPITER_PROGRAM
       )
       .accounts({ payer: admin })
       .rpc()
   );
   await tryRpc("whitelistMaker(admin)", () =>
-    program.methods
-      .whitelistMaker(admin, true)
-      .accounts({ owner: admin })
-      .rpc()
+    program.methods.whitelistMaker(admin, true).accounts({ owner: admin }).rpc()
   );
 
   const vaultCounterPda = findPda(
@@ -399,7 +427,7 @@ async function main() {
   if (balSol < 0.5) {
     throw new Error(
       `Insufficient balance: ${balSol} SOL. Need >= 0.5 SOL for tx fees. ` +
-      `Run: solana airdrop 1 ${admin.publicKey.toBase58()} --url devnet`
+        `Run: solana airdrop 1 ${admin.publicKey.toBase58()} --url devnet`
     );
   }
 
@@ -419,16 +447,33 @@ async function main() {
   }
 
   const pdas = {
-    controller: findPda([Buffer.from("controller_config")], programs.controller.programId),
-    marginPool: findPda([Buffer.from("margin_pool_config")], programs.marginPool.programId),
+    controller: findPda(
+      [Buffer.from("controller_config")],
+      programs.controller.programId
+    ),
+    marginPool: findPda(
+      [Buffer.from("margin_pool_config")],
+      programs.marginPool.programId
+    ),
     oracle: findPda([Buffer.from("oracle_config")], programs.oracle.programId),
-    whitelist: findPda([Buffer.from("whitelist_config")], programs.whitelist.programId),
-    factory: findPda([Buffer.from("factory_config")], programs.otokenFactory.programId),
-    settler: findPda([Buffer.from("settler_config")], programs.batchSettler.programId),
+    whitelist: findPda(
+      [Buffer.from("whitelist_config")],
+      programs.whitelist.programId
+    ),
+    factory: findPda(
+      [Buffer.from("factory_config")],
+      programs.otokenFactory.programId
+    ),
+    settler: findPda(
+      [Buffer.from("settler_config")],
+      programs.batchSettler.programId
+    ),
   };
 
   const tokens = await createMockTokens(
-    connection, admin.payer, admin.publicKey
+    connection,
+    admin.payer,
+    admin.publicKey
   );
 
   await initAddressBook(programs.addressBook, admin.publicKey, pdas);
@@ -436,15 +481,23 @@ async function main() {
   await initOracle(programs.oracle, admin.publicKey, tokens);
   await initController(programs.controller, admin.publicKey);
   await initMarginPool(
-    programs.marginPool, connection, admin.payer,
-    admin.publicKey, pdas.controller, tokens
+    programs.marginPool,
+    connection,
+    admin.payer,
+    admin.publicKey,
+    pdas.controller,
+    tokens
   );
   await initOtokenFactory(
-    programs.otokenFactory, admin.publicKey, pdas.controller
+    programs.otokenFactory,
+    admin.publicKey,
+    pdas.controller
   );
   await initBatchSettler(
-    programs.batchSettler, admin.publicKey,
-    programs.controller.programId, pdas.settler
+    programs.batchSettler,
+    admin.publicKey,
+    programs.controller.programId,
+    pdas.settler
   );
 
   console.log("\n========================================");
@@ -452,9 +505,8 @@ async function main() {
   console.log("========================================");
   console.log("\nMock Tokens:");
   console.log(`  USDC:  ${tokens.usdc.toBase58()}`);
-  console.log(`  JUP:   ${tokens.jup.toBase58()}`);
-  console.log(`  XAU:   ${tokens.xau.toBase58()}`);
   console.log(`  wSOL:  ${NATIVE_SOL_MINT.toBase58()}`);
+  console.log(`  TSLAx: ${tokens.tslax.toBase58()}`);
   console.log("\nAdmin/Operator:", admin.publicKey.toBase58());
   console.log(
     "Remaining balance:",
