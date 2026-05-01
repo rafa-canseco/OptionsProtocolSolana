@@ -61,7 +61,7 @@ function findPoolVaultAuthPda(
   programId: PublicKey
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("pool_vault_auth"), mint.toBuffer()],
+    [Buffer.from("lending_vault_auth"), mint.toBuffer()],
     programId
   );
 }
@@ -668,6 +668,7 @@ describe("b1nary-options", () => {
         .transferToUser(withdrawAmount)
         .accounts({
           config: configPda,
+          admin: admin.publicKey,
           poolVault: poolVaultPda,
           vaultTokenAccount: vaultTokenAccount,
           userTokenAccount: userTokenAccount,
@@ -704,6 +705,7 @@ describe("b1nary-options", () => {
           .transferToUser(new BN(999_999_999))
           .accounts({
             config: configPda,
+            admin: admin.publicKey,
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,
@@ -727,6 +729,7 @@ describe("b1nary-options", () => {
           .transferToUser(new BN(0))
           .accounts({
             config: configPda,
+            admin: admin.publicKey,
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,
@@ -741,6 +744,39 @@ describe("b1nary-options", () => {
           err.toString(),
           "Amount must be greater than zero"
         );
+      }
+    });
+
+    // NM-001 regression: transfer_to_user must reject any caller
+    // that isn't the configured admin. Without this guard the
+    // function would let anyone drain the lending pool via the
+    // PDA-signed SPL transfer.
+    it("rejects transfer_to_user from non-admin signer", async () => {
+      const rando = Keypair.generate();
+      const sig = await connection.requestAirdrop(
+        rando.publicKey,
+        anchor.web3.LAMPORTS_PER_SOL
+      );
+      await connection.confirmTransaction(sig);
+      try {
+        await marginPoolProgram.methods
+          .transferToUser(new BN(1))
+          .accounts({
+            config: configPda,
+            admin: rando.publicKey,
+            poolVault: poolVaultPda,
+            vaultTokenAccount: vaultTokenAccount,
+            userTokenAccount: userTokenAccount,
+            vaultAuthority: vaultAuthPda,
+            recipient: rando.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([rando])
+          .rpc();
+        assert.fail("should reject non-admin caller");
+      } catch (err: any) {
+        // Anchor's has_one violation surfaces as ConstraintHasOne.
+        assert.include(err.toString(), "ConstraintHasOne");
       }
     });
   });
@@ -2408,6 +2444,7 @@ describe("b1nary-options", () => {
               otokenMint: otokenMint,
               userCollateralAccount: userCollateralAccount,
               poolTokenAccount: poolTokenAccount,
+              poolVaultAuthority: poolVaultAuthPda,
               settlerOtokenAccount: settlerOtokenAccount,
               mmPremiumAccount: mmPremiumAccount,
               userPremiumAccount: userPremiumAccount,
@@ -2627,6 +2664,289 @@ describe("b1nary-options", () => {
         );
       });
 
+      // NM-002 regression: execute_order must reject when the
+      // signing user is not the owner of user_collateral_account.
+      // Without the constraint, an attacker could spend any victim's
+      // pre-delegated collateral account by signing as themselves.
+      it("rejects when user_collateral_account.owner != user.key() (NM-002)", async () => {
+        const attacker = Keypair.generate();
+        const fundSig = await connection.requestAirdrop(
+          attacker.publicKey,
+          2 * LAMPORTS_PER_SOL
+        );
+        await connection.confirmTransaction(fundSig);
+
+        // Attacker's own premium destination so user_premium_account's
+        // owner check passes if Anchor were to evaluate it before
+        // user_collateral_account — keeps the failure attributable to
+        // user_collateral_account.
+        const attackerPremiumAccount = await createAccount(
+          connection,
+          attacker,
+          premiumMint,
+          attacker.publicKey,
+          Keypair.generate()
+        );
+
+        // Get the current maker nonce (incremented in stale-nonce test).
+        const makerStateData =
+          await batchSettlerProgram.account.makerState.fetch(
+            findMakerStatePda(maker.publicKey, batchSettlerProgram.programId)[0]
+          );
+        const currentNonce = makerStateData.nonce;
+        const newQuoteId = new BN(301);
+
+        const message = buildQuoteMessage(
+          otokenMint,
+          bidPrice,
+          deadline,
+          newQuoteId,
+          maxAmount,
+          currentNonce
+        );
+        const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: maker.secretKey,
+          message,
+        });
+
+        const [quoteFillPda] = findQuoteFillPda(
+          maker.publicKey,
+          newQuoteId,
+          batchSettlerProgram.programId
+        );
+        const [makerStatePda] = findMakerStatePda(
+          maker.publicKey,
+          batchSettlerProgram.programId
+        );
+        const [newVaultPda] = findVaultPda(
+          settlerConfigPda,
+          new BN(1),
+          controllerProgram.programId
+        );
+        const [newMmBalPda] = findMakerOTokenBalancePda(
+          maker.publicKey,
+          otokenMint,
+          batchSettlerProgram.programId
+        );
+
+        const ix = await batchSettlerProgram.methods
+          .executeOrder(
+            orderAmount,
+            bidPrice,
+            deadline,
+            newQuoteId,
+            maxAmount,
+            currentNonce,
+            collateralAmount,
+            collateralMint
+          )
+          .accounts({
+            settlerConfig: settlerConfigPda,
+            makerState: makerStatePda,
+            quoteFill: quoteFillPda,
+            controllerConfig: controllerConfigPda,
+            vault: newVaultPda,
+            vaultCounter: vaultCounterForSettler,
+            otokenInfo: otokenInfoPda,
+            otokenMint: otokenMint,
+            // Pass the legitimate user's delegated account.
+            userCollateralAccount: userCollateralAccount,
+            poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
+            settlerOtokenAccount: settlerOtokenAccount,
+            mmPremiumAccount: mmPremiumAccount,
+            // Attacker's own premium destination (keeps user_premium
+            // owner check from being the first to fail).
+            userPremiumAccount: attackerPremiumAccount,
+            treasuryAccount: treasuryPremiumAccount,
+            makerOtokenBalance: newMmBalPda,
+            vaultMm: findVaultMMPda(
+              newVaultPda,
+              batchSettlerProgram.programId
+            )[0],
+            // Attacker is the user signer — owner mismatch must revert.
+            user: attacker.publicKey,
+            maker: maker.publicKey,
+            controllerProgram: controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .instruction();
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        const msgV0 = new TransactionMessage({
+          payerKey: attacker.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [ed25519Ix, ix],
+        }).compileToV0Message();
+        const vtx = new VersionedTransaction(msgV0);
+        vtx.sign([attacker]);
+
+        try {
+          await connection.sendRawTransaction(vtx.serialize());
+          assert.fail("should reject mismatched user_collateral_account.owner");
+        } catch (err: any) {
+          if (err.message === "should reject mismatched user_collateral_account.owner") {
+            throw err;
+          }
+          const logs = (err.logs || []).join("\n");
+          // Unauthorized variant from SettlerError, or its hex 0x1781.
+          assert.ok(
+            logs.includes("Unauthorized") ||
+              err.message.includes("0x1781"),
+            `expected Unauthorized, got: ${err.message}\n${logs}`
+          );
+        }
+      });
+
+      // NM-003 regression: execute_order must reject when
+      // mm_premium_account.owner is not the maker that signed the
+      // quote. Without the constraint, a colluding user could fund
+      // MM_X's quote from MM_Y's pre-delegated account.
+      it("rejects when mm_premium_account.owner != maker.key() (NM-003)", async () => {
+        // Second MM with their own delegated premium account.
+        const attackerMaker = Keypair.generate();
+        const fundSig = await connection.requestAirdrop(
+          attackerMaker.publicKey,
+          2 * LAMPORTS_PER_SOL
+        );
+        await connection.confirmTransaction(fundSig);
+
+        const attackerMmPremiumAccount = await createAccount(
+          connection,
+          attackerMaker,
+          premiumMint,
+          attackerMaker.publicKey,
+          Keypair.generate()
+        );
+        // Delegate to settler PDA so the SPL transfer would not fail
+        // for that reason — the test is about the owner constraint.
+        const tokenLib = require("@solana/spl-token");
+        const approveIx = tokenLib.createApproveInstruction(
+          attackerMmPremiumAccount,
+          settlerConfigPda,
+          attackerMaker.publicKey,
+          1_000_000
+        );
+        const approveTx = new Transaction().add(approveIx);
+        approveTx.recentBlockhash = (
+          await connection.getLatestBlockhash()
+        ).blockhash;
+        approveTx.feePayer = attackerMaker.publicKey;
+        approveTx.sign(attackerMaker);
+        await connection.sendRawTransaction(approveTx.serialize());
+
+        // The legitimate maker signs the quote; the user is also
+        // legitimate (so user_collateral_account constraint passes).
+        const makerStateData =
+          await batchSettlerProgram.account.makerState.fetch(
+            findMakerStatePda(maker.publicKey, batchSettlerProgram.programId)[0]
+          );
+        const currentNonce = makerStateData.nonce;
+        const newQuoteId = new BN(302);
+
+        const message = buildQuoteMessage(
+          otokenMint,
+          bidPrice,
+          deadline,
+          newQuoteId,
+          maxAmount,
+          currentNonce
+        );
+        const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: maker.secretKey,
+          message,
+        });
+
+        const [quoteFillPda] = findQuoteFillPda(
+          maker.publicKey,
+          newQuoteId,
+          batchSettlerProgram.programId
+        );
+        const [makerStatePda] = findMakerStatePda(
+          maker.publicKey,
+          batchSettlerProgram.programId
+        );
+        const [newVaultPda] = findVaultPda(
+          settlerConfigPda,
+          new BN(1),
+          controllerProgram.programId
+        );
+        const [newMmBalPda] = findMakerOTokenBalancePda(
+          maker.publicKey,
+          otokenMint,
+          batchSettlerProgram.programId
+        );
+
+        const ix = await batchSettlerProgram.methods
+          .executeOrder(
+            orderAmount,
+            bidPrice,
+            deadline,
+            newQuoteId,
+            maxAmount,
+            currentNonce,
+            collateralAmount,
+            collateralMint
+          )
+          .accounts({
+            settlerConfig: settlerConfigPda,
+            makerState: makerStatePda,
+            quoteFill: quoteFillPda,
+            controllerConfig: controllerConfigPda,
+            vault: newVaultPda,
+            vaultCounter: vaultCounterForSettler,
+            otokenInfo: otokenInfoPda,
+            otokenMint: otokenMint,
+            userCollateralAccount: userCollateralAccount,
+            poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
+            settlerOtokenAccount: settlerOtokenAccount,
+            // Wrong premium account: owned by attackerMaker, not maker.
+            mmPremiumAccount: attackerMmPremiumAccount,
+            userPremiumAccount: userPremiumAccount,
+            treasuryAccount: treasuryPremiumAccount,
+            makerOtokenBalance: newMmBalPda,
+            vaultMm: findVaultMMPda(
+              newVaultPda,
+              batchSettlerProgram.programId
+            )[0],
+            user: user.publicKey,
+            maker: maker.publicKey, // signed-quote maker
+            controllerProgram: controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .instruction();
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        const msgV0 = new TransactionMessage({
+          payerKey: user.publicKey,
+          recentBlockhash: blockhash,
+          instructions: [ed25519Ix, ix],
+        }).compileToV0Message();
+        const vtx = new VersionedTransaction(msgV0);
+        vtx.sign([user]);
+
+        try {
+          await connection.sendRawTransaction(vtx.serialize());
+          assert.fail("should reject mismatched mm_premium_account.owner");
+        } catch (err: any) {
+          if (err.message === "should reject mismatched mm_premium_account.owner") {
+            throw err;
+          }
+          const logs = (err.logs || []).join("\n");
+          // InvalidCustodyAccount variant.
+          assert.ok(
+            logs.includes("InvalidCustodyAccount") ||
+              err.message.includes("InvalidCustodyAccount"),
+            `expected InvalidCustodyAccount, got: ${err.message}\n${logs}`
+          );
+        }
+      });
+
       it("rejects order with stale nonce", async () => {
         // Increment nonce from 1 to 2
         await batchSettlerProgram.methods
@@ -2682,6 +3002,7 @@ describe("b1nary-options", () => {
               otokenMint: otokenMint,
               userCollateralAccount: userCollateralAccount,
               poolTokenAccount: poolTokenAccount,
+              poolVaultAuthority: poolVaultAuthPda,
               settlerOtokenAccount: settlerOtokenAccount,
               mmPremiumAccount: mmPremiumAccount,
               userPremiumAccount: userPremiumAccount,

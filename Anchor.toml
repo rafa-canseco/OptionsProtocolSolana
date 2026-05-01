@@ -13,6 +13,7 @@ otoken_factory = "84hBdboukYWVg7DoBu5Z22vCgodG4B1PFSMXrBZAivZ1"
 oracle = "EMgyserXHEQz4dYTT9LoSa5KNszXnTruV6LL5w63dvJd"
 whitelist = "F759VGDWkcxjjGByWZTTdDKJwj1RFzH2VHZS3p4VXnts"
 batch_settler = "GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS"
+mock_jupiter = "47PWVPu1ARAy82XGuzdTcfV9mckm5DWiGh2Sgfn1fSQn"
 
 [programs.devnet]
 address_book = "4gJ1QmshidSWf3qqJk7pnythWtMtdpR4robr15oL3JUb"

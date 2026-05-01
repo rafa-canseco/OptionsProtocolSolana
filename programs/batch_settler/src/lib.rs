@@ -353,6 +353,10 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
+        // Snapshot balance so we transfer only the redeem delta, not
+        // any pre-existing donations or residue from prior operations.
+        let balance_before = ctx.accounts.settler_collateral_account.amount;
+
         // CPI: redeem oTokens → collateral to settler
         controller::cpi::redeem(
             CpiContext::new_with_signer(
@@ -376,9 +380,14 @@ pub mod batch_settler {
             amount,
         )?;
 
-        // Transfer payout from settler's collateral account to MM
+        // Transfer redeem delta to MM
         ctx.accounts.settler_collateral_account.reload()?;
-        let payout = ctx.accounts.settler_collateral_account.amount;
+        let payout = ctx
+            .accounts
+            .settler_collateral_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(SettlerError::MathOverflow)?;
         if payout > 0 {
             token::transfer(
                 CpiContext::new_with_signer(
@@ -440,6 +449,10 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
+        // Snapshot balance so we transfer only the redeem delta, not
+        // any pre-existing donations or residue from prior operations.
+        let balance_before = ctx.accounts.settler_collateral_account.amount;
+
         // CPI: redeem oTokens → collateral to settler
         controller::cpi::redeem(
             CpiContext::new_with_signer(
@@ -463,9 +476,14 @@ pub mod batch_settler {
             amount,
         )?;
 
-        // Transfer payout to MM
+        // Transfer redeem delta to MM
         ctx.accounts.settler_collateral_account.reload()?;
-        let payout = ctx.accounts.settler_collateral_account.amount;
+        let payout = ctx
+            .accounts
+            .settler_collateral_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(SettlerError::MathOverflow)?;
         if payout > 0 {
             token::transfer(
                 CpiContext::new_with_signer(
@@ -510,29 +528,65 @@ pub mod batch_settler {
         Ok(())
     }
 
-    /// Physical delivery for ITM options. Operator constructs a tx with:
-    /// ix[0]: Kamino flash_borrow → contra-asset to settler
-    /// ix[1]: this instruction (deliver + redeem + Jupiter swap)
-    /// ix[2]: Kamino flash_repay
-    #[allow(clippy::too_many_arguments)]
+    /// Physical delivery for ITM options.
+    ///
+    /// No flash loan: redeem oTokens first, then Jupiter swaps
+    /// the redeem proceeds into contra-asset. The user receives
+    /// `contra_amount` of contra after the swap; the MM receives
+    /// the surplus.
+    ///
+    /// `contra_amount` is computed on-chain from the option spec
+    /// (see compute_contra_amount). Operator supplies the Jupiter
+    /// route via `jupiter_route_data` + remaining_accounts.
     pub fn physical_redeem(
-        mut ctx: Context<PhysicalRedeem>,
+        ctx: Context<PhysicalRedeem>,
         amount: u64,
-        contra_amount: u64,
         jupiter_route_data: Vec<u8>,
     ) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
-        require!(contra_amount > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
 
         validate_itm(&ctx.accounts.otoken_info)?;
 
-        let mm_bal = &ctx.accounts.maker_otoken_balance;
+        // Validate contra_mint matches the option's expected contra
+        // (PUT delivers underlying, CALL delivers strike asset).
+        let is_put = ctx.accounts.otoken_info.is_put;
+        let expected_contra = if is_put {
+            ctx.accounts.otoken_info.underlying
+        } else {
+            ctx.accounts.otoken_info.strike_asset
+        };
         require!(
-            mm_bal.balance >= amount,
-            SettlerError::InsufficientMMBalance
+            ctx.accounts.contra_mint.key() == expected_contra,
+            SettlerError::InvalidContraMint
         );
 
+        // Compute on-chain how much contra the user is owed.
+        let contra_amount = compute_contra_amount(
+            amount,
+            ctx.accounts.otoken_info.strike_price,
+            is_put,
+            ctx.accounts.contra_mint.decimals,
+        )?;
+
+        // MM destination must hold the asset MM actually receives:
+        //   PUT  → surplus collateral (collateral_mint)
+        //   CALL → surplus contra    (contra_mint)
+        let expected_mm_mint = if is_put {
+            ctx.accounts.otoken_info.collateral_mint
+        } else {
+            expected_contra
+        };
+        require!(
+            ctx.accounts.mm_collateral_account.mint == expected_mm_mint,
+            SettlerError::InvalidCustodyAccount
+        );
+
+        // MM custody balance check + CEI decrement.
+        require!(
+            ctx.accounts.maker_otoken_balance.balance >= amount,
+            SettlerError::InsufficientMMBalance
+        );
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
         mm_bal.balance = mm_bal
             .balance
@@ -542,10 +596,133 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
-        transfer_contra_to_user(&ctx, signer_seeds, contra_amount)?;
+        // Snapshot every account Jupiter may touch so we can
+        // attribute deltas precisely after the swap.
+        let collateral_before = ctx.accounts.settler_collateral_account.amount;
+        let user_contra_before = ctx.accounts.user_contra_account.amount;
+        let settler_contra_before = ctx.accounts.settler_contra_account.amount;
+
+        // Redeem the custodied oTokens. The controller transfers the
+        // full collateral payout into settler_collateral_account.
         cpi_redeem_otoken(&ctx, signer_seeds, amount)?;
+
+        ctx.accounts.settler_collateral_account.reload()?;
+        let collateral_after_redeem = ctx.accounts.settler_collateral_account.amount;
+        let collateral_received = collateral_after_redeem
+            .checked_sub(collateral_before)
+            .ok_or(SettlerError::MathOverflow)?;
+        require!(collateral_received > 0, SettlerError::RedeemReturnedZero);
+
+        // Operator-supplied Jupiter route. NM-010 hardening: we don't
+        // trust the route — every relevant balance is reloaded and the
+        // deltas are checked below.
         invoke_jupiter_swap(&ctx, signer_seeds, jupiter_route_data)?;
-        transfer_surplus_to_mm(&mut ctx, signer_seeds)?;
+
+        ctx.accounts.settler_collateral_account.reload()?;
+        ctx.accounts.user_contra_account.reload()?;
+        ctx.accounts.settler_contra_account.reload()?;
+
+        let collateral_after_swap = ctx.accounts.settler_collateral_account.amount;
+        let user_contra_after = ctx.accounts.user_contra_account.amount;
+        let settler_contra_after = ctx.accounts.settler_contra_account.amount;
+
+        let collateral_used = collateral_after_redeem
+            .checked_sub(collateral_after_swap)
+            .ok_or(SettlerError::MathOverflow)?;
+        let user_contra_delta = user_contra_after
+            .checked_sub(user_contra_before)
+            .ok_or(SettlerError::MathOverflow)?;
+        let settler_contra_delta = settler_contra_after
+            .checked_sub(settler_contra_before)
+            .ok_or(SettlerError::MathOverflow)?;
+
+        if is_put {
+            // PUT: route must send contra directly to user_contra_account.
+            // settler_contra_account must NOT be touched by the route.
+            require!(
+                user_contra_delta >= contra_amount,
+                SettlerError::InsufficientSwapOutput
+            );
+            require!(
+                settler_contra_delta == 0,
+                SettlerError::UnexpectedSwapDestination
+            );
+            // The route must consume some collateral as input. A
+            // zero-input swap delivering contra to the user is a
+            // signal Jupiter sourced funds elsewhere — refuse it.
+            require!(
+                collateral_used > 0,
+                SettlerError::UnexpectedSwapDestination
+            );
+
+            // Surplus collateral (collateral_mint) → MM.
+            let surplus_collateral = collateral_received
+                .checked_sub(collateral_used)
+                .ok_or(SettlerError::MathOverflow)?;
+            if surplus_collateral > 0 {
+                token::transfer(
+                    CpiContext::new_with_signer(
+                        ctx.accounts.token_program.to_account_info(),
+                        Transfer {
+                            from: ctx.accounts.settler_collateral_account.to_account_info(),
+                            to: ctx.accounts.mm_collateral_account.to_account_info(),
+                            authority: ctx.accounts.settler_config.to_account_info(),
+                        },
+                        signer_seeds,
+                    ),
+                    surplus_collateral,
+                )?;
+            }
+        } else {
+            // CALL: route must consume all the redeemed collateral
+            // and deposit contra into settler_contra_account. Jupiter
+            // must NOT route directly to the user.
+            require!(
+                collateral_used == collateral_received,
+                SettlerError::UnexpectedSwapDestination
+            );
+            require!(
+                settler_contra_delta >= contra_amount,
+                SettlerError::InsufficientSwapOutput
+            );
+            require!(
+                user_contra_delta == 0,
+                SettlerError::UnexpectedSwapDestination
+            );
+
+            // Pay the user exactly contra_amount.
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.settler_contra_account.to_account_info(),
+                        to: ctx.accounts.user_contra_account.to_account_info(),
+                        authority: ctx.accounts.settler_config.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                contra_amount,
+            )?;
+
+            // Surplus contra (contra_mint) → MM.
+            let surplus_contra = settler_contra_delta
+                .checked_sub(contra_amount)
+                .ok_or(SettlerError::MathOverflow)?;
+            if surplus_contra > 0 {
+                token::transfer(
+                    CpiContext::new_with_signer(
+                        ctx.accounts.token_program.to_account_info(),
+                        Transfer {
+                            from: ctx.accounts.settler_contra_account.to_account_info(),
+                            to: ctx.accounts.mm_collateral_account.to_account_info(),
+                            authority: ctx.accounts.settler_config.to_account_info(),
+                        },
+                        signer_seeds,
+                    ),
+                    surplus_contra,
+                )?;
+            }
+        }
 
         emit!(PhysicalDeliveryEvent {
             user: ctx.accounts.user.key(),
@@ -553,6 +730,7 @@ pub mod batch_settler {
             otoken_mint: ctx.accounts.otoken_mint.key(),
             amount,
             contra_amount,
+            collateral_used,
         });
         Ok(())
     }
@@ -757,8 +935,14 @@ pub struct ExecuteOrder<'info> {
     #[account(mut)]
     pub otoken_mint: Box<Account<'info, Mint>>,
 
-    /// User's collateral token account (delegated to settler PDA)
-    #[account(mut)]
+    /// User's collateral token account (delegated to settler PDA).
+    /// Owner must match the signing user — prevents an attacker from
+    /// using a victim's pre-delegated account as the source of collateral.
+    #[account(
+        mut,
+        constraint = user_collateral_account.owner == user.key()
+            @ SettlerError::Unauthorized,
+    )]
     pub user_collateral_account: Box<Account<'info, TokenAccount>>,
     /// Controller pool receiving collateral
     #[account(mut)]
@@ -774,11 +958,21 @@ pub struct ExecuteOrder<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
-    /// MM's premium account (delegated to settler PDA, source of premium)
-    #[account(mut)]
+    /// MM's premium account (delegated to settler PDA, source of premium).
+    /// Owner must be the signed-quote maker — prevents using one MM's
+    /// delegation to fund another MM's quote.
+    #[account(
+        mut,
+        constraint = mm_premium_account.owner == maker.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
     pub mm_premium_account: Box<Account<'info, TokenAccount>>,
-    /// User receives net premium here
-    #[account(mut)]
+    /// User receives net premium here. Must belong to the signing user.
+    #[account(
+        mut,
+        constraint = user_premium_account.owner == user.key()
+            @ SettlerError::Unauthorized,
+    )]
     pub user_premium_account: Box<Account<'info, TokenAccount>>,
     /// Treasury receives protocol fee here
     #[account(
@@ -974,13 +1168,18 @@ pub struct RedeemForMM<'info> {
     /// Settler's collateral account (receives redeem payout)
     #[account(
         mut,
+        constraint = settler_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
-    /// MM's collateral account — must be owned by the maker
+    /// MM's collateral account — must be owned by the maker and hold
+    /// the option's collateral mint.
     #[account(
         mut,
+        constraint = mm_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = mm_collateral_account.owner
             == maker_otoken_balance.maker
             @ SettlerError::InvalidCustodyAccount,
@@ -1038,11 +1237,21 @@ pub struct MMSelfRedeem<'info> {
     pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
     #[account(
         mut,
+        constraint = settler_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    /// MM (self-redeem) destination — must be owned by the signing
+    /// maker and hold the option's collateral mint.
+    #[account(
+        mut,
+        constraint = mm_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = mm_collateral_account.owner == maker.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
     pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
     pub pool_token_account: Box<Account<'info, TokenAccount>>,
@@ -1128,27 +1337,59 @@ pub struct PhysicalRedeem<'info> {
     /// Settler's collateral token account (receives redeem payout)
     #[account(
         mut,
+        constraint = settler_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
-    /// Settler's contra-asset token account (has borrowed flash loan funds)
+    /// The contra-asset mint. For PUT this must equal
+    /// otoken_info.underlying; for CALL it must equal
+    /// otoken_info.strike_asset. Validated in the handler.
+    pub contra_mint: Account<'info, Mint>,
+    /// Settler's contra-asset token account.
+    ///
+    /// CALL flow: receives the Jupiter swap output, then pays the
+    /// user contra_amount and routes the surplus to the MM.
+    /// PUT flow: must remain untouched by the swap. The handler
+    /// asserts a zero delta on this account, so a route that
+    /// accidentally deposits contra here reverts.
     #[account(
         mut,
+        constraint = settler_contra_account.mint == contra_mint.key()
+            @ SettlerError::InvalidContraMint,
         constraint = settler_contra_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_contra_account: Box<Account<'info, TokenAccount>>,
-    /// User receives contra-asset (physical delivery)
-    #[account(mut)]
+    /// User's contra-asset destination. For PUT this is the direct
+    /// Jupiter swap output; for CALL this is paid from settler_contra
+    /// after the swap. Owner must match `user`.
+    #[account(
+        mut,
+        constraint = user_contra_account.mint == contra_mint.key()
+            @ SettlerError::InvalidContraMint,
+        constraint = user_contra_account.owner == user.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
     pub user_contra_account: Box<Account<'info, TokenAccount>>,
-    /// CHECK: User identity for event emission
+    /// CHECK: User identity. user_contra_account is bound to this key.
     pub user: AccountInfo<'info>,
-    /// MM receives surplus collateral
+    /// MM receives surplus. Owner must be the maker the option was
+    /// custodied for. Mint must match the surplus asset:
+    ///   PUT  → otoken_info.collateral_mint
+    ///   CALL → contra_mint
+    /// The mint check is conditional on is_put, so it lives in the
+    /// handler. The owner binding is enforced here at deserialization.
+    #[account(
+        mut,
+        constraint = mm_collateral_account.owner
+            == maker_otoken_balance.maker
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
-    pub mm_collateral_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
@@ -1254,6 +1495,7 @@ pub struct PhysicalDeliveryEvent {
     pub otoken_mint: Pubkey,
     pub amount: u64,
     pub contra_amount: u64,
+    pub collateral_used: u64,
 }
 
 // ============================================================
@@ -1312,6 +1554,16 @@ pub enum SettlerError {
     InvalidJupiterProgram,
     #[msg("Vault not yet settled")]
     VaultNotSettled,
+    #[msg("Contra mint does not match the option's expected contra asset")]
+    InvalidContraMint,
+    #[msg("Contra-asset decimals out of supported range")]
+    UnsupportedDecimals,
+    #[msg("Jupiter swap output below required contra amount")]
+    InsufficientSwapOutput,
+    #[msg("Jupiter route deposited into an unexpected account")]
+    UnexpectedSwapDestination,
+    #[msg("Controller redeem returned zero collateral")]
+    RedeemReturnedZero,
 }
 
 // ============================================================
@@ -1571,23 +1823,50 @@ fn validate_itm(otoken_info: &controller::OTokenInfo) -> Result<()> {
     Ok(())
 }
 
-fn transfer_contra_to_user(
-    ctx: &Context<PhysicalRedeem>,
-    signer_seeds: &[&[&[u8]]],
-    contra_amount: u64,
-) -> Result<()> {
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.settler_contra_account.to_account_info(),
-                to: ctx.accounts.user_contra_account.to_account_info(),
-                authority: ctx.accounts.settler_config.to_account_info(),
-            },
-            signer_seeds,
-        ),
-        contra_amount,
-    )
+/// Compute the contra-asset amount the user is owed at settlement.
+///
+/// Matches Base's `_executePhysicalRedeem`:
+///   PUT  → contra = amount * 10^(contra_decimals - 8)
+///   CALL → contra = amount * strike_price / 10^(16 - contra_decimals)
+///
+/// Decimal range guards mirror Base (PUT 8..=18, CALL 6..=16) so the
+/// shifts cannot overflow or underflow the integer math.
+fn compute_contra_amount(
+    amount: u64,
+    strike_price: u64,
+    is_put: bool,
+    contra_decimals: u8,
+) -> Result<u64> {
+    let result_u128: u128 = if is_put {
+        require!(
+            (8..=18).contains(&contra_decimals),
+            SettlerError::UnsupportedDecimals
+        );
+        let factor = 10u128
+            .checked_pow((contra_decimals - 8) as u32)
+            .ok_or(SettlerError::MathOverflow)?;
+        (amount as u128)
+            .checked_mul(factor)
+            .ok_or(SettlerError::MathOverflow)?
+    } else {
+        require!(
+            (6..=16).contains(&contra_decimals),
+            SettlerError::UnsupportedDecimals
+        );
+        let divisor = 10u128
+            .checked_pow((16 - contra_decimals) as u32)
+            .ok_or(SettlerError::MathOverflow)?;
+        (amount as u128)
+            .checked_mul(strike_price as u128)
+            .ok_or(SettlerError::MathOverflow)?
+            .checked_div(divisor)
+            .ok_or(SettlerError::MathOverflow)?
+    };
+    let result: u64 = result_u128
+        .try_into()
+        .map_err(|_| error!(SettlerError::MathOverflow))?;
+    require!(result > 0, SettlerError::ZeroAmount);
+    Ok(result)
 }
 
 fn cpi_redeem_otoken(
@@ -1652,25 +1931,3 @@ fn invoke_jupiter_swap(
         .map_err(Into::into)
 }
 
-fn transfer_surplus_to_mm(
-    ctx: &mut Context<PhysicalRedeem>,
-    signer_seeds: &[&[&[u8]]],
-) -> Result<()> {
-    ctx.accounts.settler_collateral_account.reload()?;
-    let surplus = ctx.accounts.settler_collateral_account.amount;
-    if surplus > 0 {
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.settler_collateral_account.to_account_info(),
-                    to: ctx.accounts.mm_collateral_account.to_account_info(),
-                    authority: ctx.accounts.settler_config.to_account_info(),
-                },
-                signer_seeds,
-            ),
-            surplus,
-        )?;
-    }
-    Ok(())
-}

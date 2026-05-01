@@ -96,7 +96,7 @@ pub mod margin_pool {
 
         let mint_key = pool_vault.collateral_mint;
         let seeds = &[
-            b"pool_vault_auth".as_ref(),
+            b"lending_vault_auth".as_ref(),
             mint_key.as_ref(),
             &[pool_vault.vault_authority_bump],
         ];
@@ -211,7 +211,7 @@ pub mod margin_pool {
 
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"pool_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
         let signer_seeds = &[&seeds[..]];
 
         invoke_with_remaining(
@@ -260,7 +260,7 @@ pub mod margin_pool {
         let vault = &ctx.accounts.pool_vault;
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"pool_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
         let signer_seeds = &[&seeds[..]];
 
         invoke_with_remaining(
@@ -322,7 +322,7 @@ pub mod margin_pool {
         let vault = &ctx.accounts.pool_vault;
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"pool_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
         let signer_seeds = &[&seeds[..]];
 
         // 1. Withdraw yield from Kamino → vault token account
@@ -390,7 +390,7 @@ pub mod margin_pool {
 
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"pool_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
         let signer_seeds = &[&seeds[..]];
 
         invoke_with_remaining(
@@ -428,6 +428,14 @@ pub struct MarginPoolConfig {
 }
 
 /// PDA seeds: [b"pool_vault", collateral_mint]
+///
+/// The associated SPL token account (`token_account`) is owned by
+/// the PDA derived from [b"lending_vault_auth", collateral_mint]
+/// in this program. This is intentionally a different namespace
+/// from the controller's [b"pool_vault_auth", collateral_mint] PDA:
+/// margin_pool tracks lending pool funds (Kamino-bound), controller
+/// tracks vault collateral. The two pools are independent and must
+/// not be conflated.
 #[account]
 pub struct PoolVault {
     pub collateral_mint: Pubkey,
@@ -482,7 +490,7 @@ pub struct CreatePoolVault<'info> {
     pub vault_token_account: Account<'info, TokenAccount>,
     /// CHECK: PDA used as token authority
     #[account(
-        seeds = [b"pool_vault_auth", collateral_mint.key().as_ref()],
+        seeds = [b"lending_vault_auth", collateral_mint.key().as_ref()],
         bump,
     )]
     pub vault_authority: AccountInfo<'info>,
@@ -514,8 +522,13 @@ pub struct TransferToPool<'info> {
 
 #[derive(Accounts)]
 pub struct TransferToUser<'info> {
-    #[account(seeds = [b"margin_pool_config"], bump = config.bump)]
+    #[account(
+        seeds = [b"margin_pool_config"],
+        bump = config.bump,
+        has_one = admin,
+    )]
     pub config: Account<'info, MarginPoolConfig>,
+    pub admin: Signer<'info>,
     #[account(
         mut,
         seeds = [b"pool_vault", pool_vault.collateral_mint.as_ref()],
@@ -528,7 +541,7 @@ pub struct TransferToUser<'info> {
     pub user_token_account: Account<'info, TokenAccount>,
     /// CHECK: PDA authority for pool token account
     #[account(
-        seeds = [b"pool_vault_auth", pool_vault.collateral_mint.as_ref()],
+        seeds = [b"lending_vault_auth", pool_vault.collateral_mint.as_ref()],
         bump,
     )]
     pub vault_authority: AccountInfo<'info>,
@@ -586,7 +599,7 @@ pub struct LendingOperation<'info> {
     pub vault_token_account: Account<'info, TokenAccount>,
     /// CHECK: PDA authority for pool token account
     #[account(
-        seeds = [b"pool_vault_auth", pool_vault.collateral_mint.as_ref()],
+        seeds = [b"lending_vault_auth", pool_vault.collateral_mint.as_ref()],
         bump = pool_vault.vault_authority_bump,
     )]
     pub vault_authority: AccountInfo<'info>,
@@ -618,7 +631,7 @@ pub struct HarvestYield<'info> {
     pub vault_token_account: Account<'info, TokenAccount>,
     /// CHECK: PDA authority
     #[account(
-        seeds = [b"pool_vault_auth", pool_vault.collateral_mint.as_ref()],
+        seeds = [b"lending_vault_auth", pool_vault.collateral_mint.as_ref()],
         bump = pool_vault.vault_authority_bump,
     )]
     pub vault_authority: AccountInfo<'info>,
