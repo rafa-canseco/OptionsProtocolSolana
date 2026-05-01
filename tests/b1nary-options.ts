@@ -21,7 +21,6 @@ import {
   approve,
 } from "@solana/spl-token";
 import { assert } from "chai";
-import { AddressBook } from "../target/types/address_book";
 import { MarginPool } from "../target/types/margin_pool";
 import { Controller } from "../target/types/controller";
 import { OtokenFactory } from "../target/types/otoken_factory";
@@ -29,13 +28,6 @@ import { BatchSettler } from "../target/types/batch_settler";
 import { Whitelist } from "../target/types/whitelist";
 
 const ZERO_PUBKEY = PublicKey.default;
-
-function findRegistryPda(programId: PublicKey): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("registry")],
-    programId
-  );
-}
 
 function findMarginPoolConfigPda(
   programId: PublicKey
@@ -267,8 +259,6 @@ describe("b1nary-options", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const addressBookProgram = anchor.workspace
-    .addressBook as Program<AddressBook>;
   const marginPoolProgram = anchor.workspace
     .marginPool as Program<MarginPool>;
   const controllerProgram = anchor.workspace
@@ -282,209 +272,6 @@ describe("b1nary-options", () => {
 
   const admin = provider.wallet as anchor.Wallet;
   const connection = provider.connection;
-
-  // ───────────────────────────────────────────
-  // AddressBook tests
-  // ───────────────────────────────────────────
-  describe("address_book", () => {
-    const [registryPda] = findRegistryPda(
-      addressBookProgram.programId
-    );
-
-    it("initializes registry with admin", async () => {
-      await addressBookProgram.methods
-        .initialize(admin.publicKey)
-        .accounts({
-          payer: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.admin.equals(admin.publicKey),
-        "admin matches"
-      );
-      assert.ok(
-        registry.pendingAdmin.equals(ZERO_PUBKEY),
-        "pending admin is zero"
-      );
-      assert.ok(
-        registry.controller.equals(ZERO_PUBKEY),
-        "controller starts zero"
-      );
-    });
-
-    it("rejects zero address on initialize", async () => {
-      try {
-        await addressBookProgram.methods
-          .setAddress({ controller: {} }, ZERO_PUBKEY)
-          .accounts({
-            admin: admin.publicKey,
-          })
-          .rpc();
-        assert.fail("should have rejected zero address");
-      } catch (err: any) {
-        assert.include(
-          err.toString(),
-          "Address cannot be zero"
-        );
-      }
-    });
-
-    it("sets controller address and verifies storage", async () => {
-      const controllerAddr = Keypair.generate().publicKey;
-      await addressBookProgram.methods
-        .setAddress({ controller: {} }, controllerAddr)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.controller.equals(controllerAddr),
-        "controller stored"
-      );
-    });
-
-    it("sets margin pool address", async () => {
-      const marginPoolAddr = Keypair.generate().publicKey;
-      await addressBookProgram.methods
-        .setAddress({ marginPool: {} }, marginPoolAddr)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.marginPool.equals(marginPoolAddr),
-        "margin pool stored"
-      );
-    });
-
-    it("sets oracle address", async () => {
-      const oracleAddr = Keypair.generate().publicKey;
-      await addressBookProgram.methods
-        .setAddress({ oracle: {} }, oracleAddr)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.oracle.equals(oracleAddr),
-        "oracle stored"
-      );
-    });
-
-    it("rejects set_address from non-admin", async () => {
-      const imposter = Keypair.generate();
-      await fundAccount(
-        provider,
-        imposter.publicKey,
-        LAMPORTS_PER_SOL
-      );
-
-      try {
-        await addressBookProgram.methods
-          .setAddress(
-            { controller: {} },
-            Keypair.generate().publicKey
-          )
-          .accounts({
-            admin: imposter.publicKey,
-          })
-          .signers([imposter])
-          .rpc();
-        assert.fail("should reject non-admin");
-      } catch (err: any) {
-        assert.include(
-          err.toString(),
-          "AnchorError caused by account: registry"
-        );
-      }
-    });
-
-    it("transfers ownership (two-step: start + accept)", async () => {
-      const newAdmin = Keypair.generate();
-      await fundAccount(
-        provider,
-        newAdmin.publicKey,
-        LAMPORTS_PER_SOL
-      );
-
-      await addressBookProgram.methods
-        .transferOwnership(newAdmin.publicKey)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      let registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.pendingAdmin.equals(newAdmin.publicKey),
-        "pending admin set"
-      );
-      assert.ok(
-        registry.admin.equals(admin.publicKey),
-        "admin unchanged until accepted"
-      );
-
-      await addressBookProgram.methods
-        .acceptOwnership()
-        .accounts({
-          newAdmin: newAdmin.publicKey,
-        })
-        .signers([newAdmin])
-        .rpc();
-
-      registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.admin.equals(newAdmin.publicKey),
-        "ownership transferred"
-      );
-      assert.ok(
-        registry.pendingAdmin.equals(ZERO_PUBKEY),
-        "pending admin cleared"
-      );
-
-      // Transfer back for remaining tests
-      await addressBookProgram.methods
-        .transferOwnership(admin.publicKey)
-        .accounts({
-          admin: newAdmin.publicKey,
-        })
-        .signers([newAdmin])
-        .rpc();
-
-      await addressBookProgram.methods
-        .acceptOwnership()
-        .accounts({
-          newAdmin: admin.publicKey,
-        })
-        .rpc();
-    });
-  });
 
   // ───────────────────────────────────────────
   // MarginPool tests

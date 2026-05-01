@@ -6,7 +6,6 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-address_book = "4gJ1QmshidSWf3qqJk7pnythWtMtdpR4robr15oL3JUb"
 controller = "FH3z4BYRZMFU8YzpJoFXUbrdoYksdERnWbZvDAEc3qcC"
 margin_pool = "Hp7XDp9USyoid2f7cJKPxmDrvHM2D8izeeGzkViPiy5r"
 otoken_factory = "84hBdboukYWVg7DoBu5Z22vCgodG4B1PFSMXrBZAivZ1"
@@ -16,7 +15,6 @@ batch_settler = "GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS"
 mock_jupiter = "47PWVPu1ARAy82XGuzdTcfV9mckm5DWiGh2Sgfn1fSQn"
 
 [programs.devnet]
-address_book = "4gJ1QmshidSWf3qqJk7pnythWtMtdpR4robr15oL3JUb"
 controller = "FH3z4BYRZMFU8YzpJoFXUbrdoYksdERnWbZvDAEc3qcC"
 margin_pool = "Hp7XDp9USyoid2f7cJKPxmDrvHM2D8izeeGzkViPiy5r"
 otoken_factory = "84hBdboukYWVg7DoBu5Z22vCgodG4B1PFSMXrBZAivZ1"
