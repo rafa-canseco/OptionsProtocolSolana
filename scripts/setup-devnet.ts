@@ -321,7 +321,7 @@ async function initMarginPool(
       program.programId
     );
     const vaultAuthPda = findPda(
-      [Buffer.from("pool_vault_auth"), m.mint.toBuffer()],
+      [Buffer.from("lending_vault_auth"), m.mint.toBuffer()],
       program.programId
     );
 

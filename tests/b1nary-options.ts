@@ -61,7 +61,7 @@ function findPoolVaultAuthPda(
   programId: PublicKey
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from("pool_vault_auth"), mint.toBuffer()],
+    [Buffer.from("lending_vault_auth"), mint.toBuffer()],
     programId
   );
 }
@@ -668,6 +668,7 @@ describe("b1nary-options", () => {
         .transferToUser(withdrawAmount)
         .accounts({
           config: configPda,
+          admin: admin.publicKey,
           poolVault: poolVaultPda,
           vaultTokenAccount: vaultTokenAccount,
           userTokenAccount: userTokenAccount,
@@ -704,6 +705,7 @@ describe("b1nary-options", () => {
           .transferToUser(new BN(999_999_999))
           .accounts({
             config: configPda,
+            admin: admin.publicKey,
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,
@@ -727,6 +729,7 @@ describe("b1nary-options", () => {
           .transferToUser(new BN(0))
           .accounts({
             config: configPda,
+            admin: admin.publicKey,
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,

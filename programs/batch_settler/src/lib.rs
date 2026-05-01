@@ -353,6 +353,10 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
+        // Snapshot balance so we transfer only the redeem delta, not
+        // any pre-existing donations or residue from prior operations.
+        let balance_before = ctx.accounts.settler_collateral_account.amount;
+
         // CPI: redeem oTokens → collateral to settler
         controller::cpi::redeem(
             CpiContext::new_with_signer(
@@ -376,9 +380,14 @@ pub mod batch_settler {
             amount,
         )?;
 
-        // Transfer payout from settler's collateral account to MM
+        // Transfer redeem delta to MM
         ctx.accounts.settler_collateral_account.reload()?;
-        let payout = ctx.accounts.settler_collateral_account.amount;
+        let payout = ctx
+            .accounts
+            .settler_collateral_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(SettlerError::MathOverflow)?;
         if payout > 0 {
             token::transfer(
                 CpiContext::new_with_signer(
@@ -440,6 +449,10 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
+        // Snapshot balance so we transfer only the redeem delta, not
+        // any pre-existing donations or residue from prior operations.
+        let balance_before = ctx.accounts.settler_collateral_account.amount;
+
         // CPI: redeem oTokens → collateral to settler
         controller::cpi::redeem(
             CpiContext::new_with_signer(
@@ -463,9 +476,14 @@ pub mod batch_settler {
             amount,
         )?;
 
-        // Transfer payout to MM
+        // Transfer redeem delta to MM
         ctx.accounts.settler_collateral_account.reload()?;
-        let payout = ctx.accounts.settler_collateral_account.amount;
+        let payout = ctx
+            .accounts
+            .settler_collateral_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(SettlerError::MathOverflow)?;
         if payout > 0 {
             token::transfer(
                 CpiContext::new_with_signer(
@@ -757,8 +775,14 @@ pub struct ExecuteOrder<'info> {
     #[account(mut)]
     pub otoken_mint: Box<Account<'info, Mint>>,
 
-    /// User's collateral token account (delegated to settler PDA)
-    #[account(mut)]
+    /// User's collateral token account (delegated to settler PDA).
+    /// Owner must match the signing user — prevents an attacker from
+    /// using a victim's pre-delegated account as the source of collateral.
+    #[account(
+        mut,
+        constraint = user_collateral_account.owner == user.key()
+            @ SettlerError::Unauthorized,
+    )]
     pub user_collateral_account: Box<Account<'info, TokenAccount>>,
     /// Controller pool receiving collateral
     #[account(mut)]
@@ -774,11 +798,21 @@ pub struct ExecuteOrder<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
-    /// MM's premium account (delegated to settler PDA, source of premium)
-    #[account(mut)]
+    /// MM's premium account (delegated to settler PDA, source of premium).
+    /// Owner must be the signed-quote maker — prevents using one MM's
+    /// delegation to fund another MM's quote.
+    #[account(
+        mut,
+        constraint = mm_premium_account.owner == maker.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
     pub mm_premium_account: Box<Account<'info, TokenAccount>>,
-    /// User receives net premium here
-    #[account(mut)]
+    /// User receives net premium here. Must belong to the signing user.
+    #[account(
+        mut,
+        constraint = user_premium_account.owner == user.key()
+            @ SettlerError::Unauthorized,
+    )]
     pub user_premium_account: Box<Account<'info, TokenAccount>>,
     /// Treasury receives protocol fee here
     #[account(
