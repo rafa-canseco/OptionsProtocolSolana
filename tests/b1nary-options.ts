@@ -187,12 +187,14 @@ function findMakerStatePda(
 function findQuoteFillPda(
   maker: PublicKey,
   quoteId: BN,
+  makerNonce: BN,
   programId: PublicKey
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from("quote_fill"),
       maker.toBuffer(),
+      makerNonce.toArrayLike(Buffer, "le", 8),
       quoteId.toArrayLike(Buffer, "le", 8),
     ],
     programId
@@ -984,6 +986,7 @@ describe("b1nary-options", () => {
           vault: vaultPda,
           userTokenAccount: userCollateralAccount,
           poolTokenAccount: poolTokenAccount,
+          poolVaultAuthority: poolVaultAuthPda,
           owner: admin.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
@@ -1017,6 +1020,7 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -1372,6 +1376,7 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -1449,6 +1454,7 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -2070,9 +2076,14 @@ describe("b1nary-options", () => {
 
     it("cancels a quote", async () => {
       const quoteId = new BN(42);
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
       await batchSettlerProgram.methods
         .cancelQuote(quoteId)
         .accounts({
+          makerState: makerStatePda,
           maker: maker.publicKey,
         })
         .signers([maker])
@@ -2081,6 +2092,7 @@ describe("b1nary-options", () => {
       const [quoteFillPda] = findQuoteFillPda(
         maker.publicKey,
         quoteId,
+        new BN(0),
         batchSettlerProgram.programId
       );
       const fill =
@@ -2244,19 +2256,21 @@ describe("b1nary-options", () => {
 
       function buildQuoteMessage(
         mint: PublicKey,
+        premium: PublicKey,
         price: BN,
         dl: BN,
         qid: BN,
         maxAmt: BN,
         nonce: BN
       ): Buffer {
-        const msg = Buffer.alloc(72);
+        const msg = Buffer.alloc(104);
         mint.toBuffer().copy(msg, 0);
-        msg.writeBigUInt64LE(BigInt(price.toString()), 32);
-        msg.writeBigInt64LE(BigInt(dl.toString()), 40);
-        msg.writeBigUInt64LE(BigInt(qid.toString()), 48);
-        msg.writeBigUInt64LE(BigInt(maxAmt.toString()), 56);
-        msg.writeBigUInt64LE(BigInt(nonce.toString()), 64);
+        premium.toBuffer().copy(msg, 32);
+        msg.writeBigUInt64LE(BigInt(price.toString()), 64);
+        msg.writeBigInt64LE(BigInt(dl.toString()), 72);
+        msg.writeBigUInt64LE(BigInt(qid.toString()), 80);
+        msg.writeBigUInt64LE(BigInt(maxAmt.toString()), 88);
+        msg.writeBigUInt64LE(BigInt(nonce.toString()), 96);
         return msg;
       }
 
@@ -2408,7 +2422,7 @@ describe("b1nary-options", () => {
 
       it("executes order: user sells option, MM buys", async () => {
         const message = buildQuoteMessage(
-          otokenMint, bidPrice, deadline,
+          otokenMint, premiumMint, bidPrice, deadline,
           quoteId, maxAmount, makerNonce
         );
 
@@ -2420,6 +2434,7 @@ describe("b1nary-options", () => {
 
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey, quoteId,
+          makerNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2431,6 +2446,7 @@ describe("b1nary-options", () => {
             .executeOrder(
               orderAmount, bidPrice, deadline,
               quoteId, maxAmount, makerNonce,
+              premiumMint,
               collateralAmount, collateralMint
             )
             .accounts({
@@ -2544,6 +2560,7 @@ describe("b1nary-options", () => {
         // Quote fill tracking
         const [quoteFillPda2] = findQuoteFillPda(
           maker.publicKey, quoteId,
+          makerNonce,
           batchSettlerProgram.programId
         );
         const fill =
@@ -2698,6 +2715,7 @@ describe("b1nary-options", () => {
 
         const message = buildQuoteMessage(
           otokenMint,
+          premiumMint,
           bidPrice,
           deadline,
           newQuoteId,
@@ -2712,6 +2730,7 @@ describe("b1nary-options", () => {
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey,
           newQuoteId,
+          currentNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2737,6 +2756,7 @@ describe("b1nary-options", () => {
             newQuoteId,
             maxAmount,
             currentNonce,
+            premiumMint,
             collateralAmount,
             collateralMint
           )
@@ -2848,6 +2868,7 @@ describe("b1nary-options", () => {
 
         const message = buildQuoteMessage(
           otokenMint,
+          premiumMint,
           bidPrice,
           deadline,
           newQuoteId,
@@ -2862,6 +2883,7 @@ describe("b1nary-options", () => {
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey,
           newQuoteId,
+          currentNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2887,6 +2909,7 @@ describe("b1nary-options", () => {
             newQuoteId,
             maxAmount,
             currentNonce,
+            premiumMint,
             collateralAmount,
             collateralMint
           )
@@ -2958,7 +2981,7 @@ describe("b1nary-options", () => {
         const staleNonce = new BN(1);
         const newQuoteId = new BN(200);
         const message = buildQuoteMessage(
-          otokenMint, bidPrice, deadline,
+          otokenMint, premiumMint, bidPrice, deadline,
           newQuoteId, maxAmount, staleNonce
         );
 
@@ -2970,6 +2993,7 @@ describe("b1nary-options", () => {
 
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey, newQuoteId,
+          staleNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2989,6 +3013,7 @@ describe("b1nary-options", () => {
             .executeOrder(
               orderAmount, bidPrice, deadline,
               newQuoteId, maxAmount, staleNonce,
+              premiumMint,
               collateralAmount, collateralMint
             )
             .accounts({

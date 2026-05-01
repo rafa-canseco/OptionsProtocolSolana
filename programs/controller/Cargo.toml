@@ -14,7 +14,13 @@ cpi = ["no-entrypoint"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
-idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build", "whitelist/idl-build"]
+idl-build = [
+    "anchor-lang/idl-build",
+    "anchor-spl/idl-build",
+    "whitelist/idl-build",
+    "otoken_factory/idl-build",
+    "oracle/idl-build",
+]
 anchor-debug = []
 custom-heap = []
 custom-panic = []
@@ -23,6 +29,8 @@ custom-panic = []
 anchor-lang = "0.32.1"
 anchor-spl = "0.32.1"
 whitelist = { path = "../whitelist", features = ["cpi"] }
+otoken_factory = { package = "otoken-factory", path = "../otoken_factory", features = ["cpi"] }
+oracle = { path = "../oracle", features = ["cpi"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

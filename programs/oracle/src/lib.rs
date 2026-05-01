@@ -58,6 +58,16 @@ pub mod oracle {
         Ok(())
     }
 
+    pub fn set_feed_active(ctx: Context<DeregisterFeed>, active: bool) -> Result<()> {
+        let feed = &mut ctx.accounts.feed;
+        feed.active = active;
+        emit!(PriceFeedStatusUpdated {
+            underlying: feed.underlying,
+            active,
+        });
+        Ok(())
+    }
+
     /// Read and validate Pyth price for a registered underlying.
     /// Returns the price normalized to 8 decimal places.
     pub fn get_price(ctx: Context<GetPrice>) -> Result<u64> {
@@ -105,9 +115,10 @@ pub mod oracle {
         let config = &ctx.accounts.config;
         let feed = &ctx.accounts.feed;
 
-        // Validate against Pyth if threshold set and feed is active
-        // (matches EVM: skip if no feed or threshold == 0)
-        if config.price_deviation_threshold_bps > 0 && feed.active {
+        require!(feed.active, OracleError::FeedNotActive);
+        // Validate against Pyth if threshold set. A deregistered feed
+        // must not be usable to bypass the deviation guard.
+        if config.price_deviation_threshold_bps > 0 {
             let pyth = parse_pyth_price_update(
                 &ctx.accounts.pyth_price_update,
                 &config.pyth_receiver_program,
@@ -415,6 +426,12 @@ pub struct PriceFeedDeregistered {
 }
 
 #[event]
+pub struct PriceFeedStatusUpdated {
+    pub underlying: Pubkey,
+    pub active: bool,
+}
+
+#[event]
 pub struct PriceQueried {
     pub underlying: Pubkey,
     pub price: u64,
@@ -526,6 +543,7 @@ struct PythPriceData {
 ///     ...remaining fields (not needed)
 ///   posted_slot    : u64
 const DISCRIMINATOR_LEN: usize = 8;
+const PRICE_UPDATE_V2_DISCRIMINATOR: [u8; 8] = [0x34, 0x2a, 0x89, 0x6f, 0xc1, 0xd0, 0x82, 0x04];
 const PUBKEY_LEN: usize = 32;
 const FEED_ID_LEN: usize = 32;
 const MIN_PRICE_MSG_BYTES: usize = FEED_ID_LEN + 8 + 8 + 4 + 8;
@@ -545,6 +563,10 @@ fn parse_pyth_price_update(
     // discriminator(8) + write_authority(32) + min verification(1) +
     // price_message(60) = 101 minimum
     require!(data.len() >= 101, OracleError::InvalidPythAccount);
+    require!(
+        data[..DISCRIMINATOR_LEN] == PRICE_UPDATE_V2_DISCRIMINATOR,
+        OracleError::InvalidPythAccount
+    );
 
     // Offset past discriminator + write_authority
     let base = DISCRIMINATOR_LEN + PUBKEY_LEN;

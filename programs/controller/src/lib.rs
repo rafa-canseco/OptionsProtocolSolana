@@ -395,38 +395,43 @@ pub mod controller {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn create_otoken_info(
-        ctx: Context<CreateOTokenInfo>,
-        otoken_mint: Pubkey,
-        underlying: Pubkey,
-        strike_asset: Pubkey,
-        collateral_mint: Pubkey,
-        strike_price: u64,
-        expiry: i64,
-        is_put: bool,
-        collateral_decimals: u8,
-    ) -> Result<()> {
-        require!(strike_price > 0, ControllerError::ZeroAmount);
+    pub fn create_otoken_info(ctx: Context<CreateOTokenInfo>) -> Result<()> {
+        let factory_otoken = &ctx.accounts.factory_otoken;
+        let collateral_decimals = ctx.accounts.collateral_mint_account.decimals;
+        require!(
+            ctx.accounts.collateral_mint_account.key() == factory_otoken.collateral,
+            ControllerError::CollateralMismatch
+        );
+        require!(factory_otoken.strike_price > 0, ControllerError::ZeroAmount);
         require!(collateral_decimals <= 18, ControllerError::InvalidDecimals);
         let info = &mut ctx.accounts.otoken_info;
-        info.otoken_mint = otoken_mint;
-        info.underlying = underlying;
-        info.strike_asset = strike_asset;
-        info.collateral_mint = collateral_mint;
-        info.strike_price = strike_price;
-        info.expiry = expiry;
-        info.is_put = is_put;
+        info.otoken_mint = factory_otoken.mint;
+        info.underlying = factory_otoken.underlying;
+        info.strike_asset = factory_otoken.strike_asset;
+        info.collateral_mint = factory_otoken.collateral;
+        info.strike_price = factory_otoken.strike_price;
+        info.expiry = factory_otoken.expiry;
+        info.is_put = factory_otoken.is_put;
         info.collateral_decimals = collateral_decimals;
         info.expiry_price = 0;
         Ok(())
     }
 
-    pub fn set_expiry_price(ctx: Context<SetExpiryPrice>, price: u64) -> Result<()> {
+    pub fn set_expiry_price(ctx: Context<SetExpiryPrice>) -> Result<()> {
+        let clock = Clock::get()?;
+        require!(
+            clock.unix_timestamp >= ctx.accounts.otoken_info.expiry,
+            ControllerError::NotExpired
+        );
+        let price = ctx.accounts.oracle_expiry_price.price;
         require!(price > 0, ControllerError::ZeroAmount);
         require!(
             ctx.accounts.otoken_info.expiry_price == 0,
             ControllerError::ExpiryPriceAlreadySet
+        );
+        require!(
+            ctx.accounts.oracle_expiry_price.is_finalized,
+            ControllerError::ExpiryPriceNotSet
         );
         ctx.accounts.otoken_info.expiry_price = price;
         Ok(())
@@ -634,8 +639,20 @@ pub struct DepositCollateral<'info> {
         constraint = pool_token_account.mint
             == vault.collateral_mint
             @ ControllerError::CollateralMismatch,
+        constraint = pool_token_account.owner
+            == pool_vault_authority.key()
+            @ ControllerError::Unauthorized,
     )]
     pub pool_token_account: Account<'info, TokenAccount>,
+    /// CHECK: PDA authority for the protocol pool, validated by seeds.
+    #[account(
+        seeds = [
+            b"pool_vault_auth",
+            vault.collateral_mint.as_ref(),
+        ],
+        bump,
+    )]
+    pub pool_vault_authority: AccountInfo<'info>,
     #[account(mut)]
     pub owner: Signer<'info>,
     pub token_program: Program<'info, Token>,
@@ -766,6 +783,9 @@ pub struct Redeem<'info> {
         mut,
         constraint = redeemer_otoken_account.mint
             == otoken_mint.key(),
+        constraint = redeemer_otoken_account.owner
+            == redeemer.key()
+            @ ControllerError::Unauthorized,
     )]
     pub redeemer_otoken_account: Account<'info, TokenAccount>,
     #[account(
@@ -773,6 +793,9 @@ pub struct Redeem<'info> {
         constraint = redeemer_collateral_account.mint
             == otoken_info.collateral_mint
             @ ControllerError::CollateralMismatch,
+        constraint = redeemer_collateral_account.owner
+            == redeemer.key()
+            @ ControllerError::Unauthorized,
     )]
     pub redeemer_collateral_account: Account<'info, TokenAccount>,
     #[account(
@@ -824,6 +847,28 @@ pub struct CreateOTokenInfo<'info> {
     pub otoken_info: Account<'info, OTokenInfo>,
     /// CHECK: oToken mint address used as PDA seed
     pub otoken_mint: AccountInfo<'info>,
+    #[account(
+        seeds = [
+            b"otoken",
+            factory_otoken.underlying.as_ref(),
+            factory_otoken.strike_asset.as_ref(),
+            factory_otoken.collateral.as_ref(),
+            factory_otoken.strike_price.to_le_bytes().as_ref(),
+            factory_otoken.expiry.to_le_bytes().as_ref(),
+            &[factory_otoken.is_put as u8],
+        ],
+        bump = factory_otoken.bump,
+        seeds::program = factory_program.key(),
+        constraint = factory_otoken.mint == otoken_mint.key()
+            @ ControllerError::OtokenMismatch,
+    )]
+    pub factory_otoken: Account<'info, otoken_factory::OToken>,
+    #[account(
+        constraint = collateral_mint_account.key()
+            == factory_otoken.collateral
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub collateral_mint_account: Account<'info, Mint>,
     /// Whitelist entry proves this oToken is approved.
     #[account(
         seeds = [b"whitelisted_otoken", otoken_mint.key().as_ref()],
@@ -834,6 +879,7 @@ pub struct CreateOTokenInfo<'info> {
     )]
     pub whitelisted_otoken: Account<'info, whitelist::WhitelistedOToken>,
     pub whitelist_program: Program<'info, whitelist::program::Whitelist>,
+    pub factory_program: Program<'info, otoken_factory::program::OtokenFactory>,
     #[account(mut)]
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -856,6 +902,21 @@ pub struct SetExpiryPrice<'info> {
         bump,
     )]
     pub otoken_info: Account<'info, OTokenInfo>,
+    #[account(
+        seeds = [
+            b"expiry_price",
+            otoken_info.underlying.as_ref(),
+            otoken_info.expiry.to_le_bytes().as_ref(),
+        ],
+        bump = oracle_expiry_price.bump,
+        seeds::program = oracle_program.key(),
+        constraint = oracle_expiry_price.is_finalized
+            @ ControllerError::ExpiryPriceNotSet,
+        constraint = oracle_expiry_price.price > 0
+            @ ControllerError::ZeroAmount,
+    )]
+    pub oracle_expiry_price: Account<'info, oracle::ExpiryPrice>,
+    pub oracle_program: Program<'info, oracle::program::Oracle>,
     pub admin: Signer<'info>,
 }
 

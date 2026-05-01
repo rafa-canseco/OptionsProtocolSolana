@@ -211,7 +211,11 @@ pub mod margin_pool {
 
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[
+            b"lending_vault_auth".as_ref(),
+            mint_key.as_ref(),
+            &[auth_bump],
+        ];
         let signer_seeds = &[&seeds[..]];
 
         invoke_with_remaining(
@@ -260,7 +264,11 @@ pub mod margin_pool {
         let vault = &ctx.accounts.pool_vault;
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[
+            b"lending_vault_auth".as_ref(),
+            mint_key.as_ref(),
+            &[auth_bump],
+        ];
         let signer_seeds = &[&seeds[..]];
 
         invoke_with_remaining(
@@ -322,7 +330,11 @@ pub mod margin_pool {
         let vault = &ctx.accounts.pool_vault;
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[
+            b"lending_vault_auth".as_ref(),
+            mint_key.as_ref(),
+            &[auth_bump],
+        ];
         let signer_seeds = &[&seeds[..]];
 
         // 1. Withdraw yield from Kamino → vault token account
@@ -390,7 +402,11 @@ pub mod margin_pool {
 
         let mint_key = vault.collateral_mint;
         let auth_bump = vault.vault_authority_bump;
-        let seeds = &[b"lending_vault_auth".as_ref(), mint_key.as_ref(), &[auth_bump]];
+        let seeds = &[
+            b"lending_vault_auth".as_ref(),
+            mint_key.as_ref(),
+            &[auth_bump],
+        ];
         let signer_seeds = &[&seeds[..]];
 
         invoke_with_remaining(

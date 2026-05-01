@@ -154,8 +154,46 @@ const findSettlerConfigPda = (pid: PublicKey) =>
   findPda([Buffer.from("settler_config")], pid);
 const findWhitelistConfigPda = (pid: PublicKey) =>
   findPda([Buffer.from("whitelist_config")], pid);
+const findFactoryConfigPda = (pid: PublicKey) =>
+  findPda([Buffer.from("factory_config")], pid);
 const findOTokenInfoPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("otoken_info"), mint.toBuffer()], pid);
+const findFactoryOTokenPda = (
+  underlying: PublicKey,
+  strikeAsset: PublicKey,
+  collateral: PublicKey,
+  strikePrice: BN,
+  expiry: BN,
+  isPut: boolean,
+  pid: PublicKey
+) =>
+  findPda([
+    Buffer.from("otoken"),
+    underlying.toBuffer(),
+    strikeAsset.toBuffer(),
+    collateral.toBuffer(),
+    strikePrice.toArrayLike(Buffer, "le", 8),
+    expiry.toArrayLike(Buffer, "le", 8),
+    Buffer.from([isPut ? 1 : 0]),
+  ], pid);
+const findFactoryOTokenMintPda = (
+  underlying: PublicKey,
+  strikeAsset: PublicKey,
+  collateral: PublicKey,
+  strikePrice: BN,
+  expiry: BN,
+  isPut: boolean,
+  pid: PublicKey
+) =>
+  findPda([
+    Buffer.from("otoken_mint"),
+    underlying.toBuffer(),
+    strikeAsset.toBuffer(),
+    collateral.toBuffer(),
+    strikePrice.toArrayLike(Buffer, "le", 8),
+    expiry.toArrayLike(Buffer, "le", 8),
+    Buffer.from([isPut ? 1 : 0]),
+  ], pid);
 const findVaultPda = (owner: PublicKey, vaultId: BN, pid: PublicKey) =>
   findPda(
     [Buffer.from("vault"), owner.toBuffer(), vaultId.toArrayLike(Buffer, "le", 8)],
@@ -167,6 +205,40 @@ const findPoolVaultAuthPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("pool_vault_auth"), mint.toBuffer()], pid);
 const findMockJupAuthPda = (pid: PublicKey) =>
   findPda([Buffer.from("mock_jupiter_auth")], pid);
+const findOracleExpiryPricePda = (underlying: PublicKey, expiry: BN, pid: PublicKey) =>
+  findPda([
+    Buffer.from("expiry_price"),
+    underlying.toBuffer(),
+    expiry.toArrayLike(Buffer, "le", 8),
+  ], pid);
+
+const EXPIRY_PRICE_DISCRIMINATOR = Buffer.from(
+  require("crypto").createHash("sha256").update("account:ExpiryPrice").digest().subarray(0, 8)
+);
+
+function injectOracleExpiryPrice(
+  context: any,
+  pda: PublicKey,
+  oracleProgramId: PublicKey,
+  underlying: PublicKey,
+  expiry: BN,
+  price: BN,
+  bump: number
+): void {
+  const data = Buffer.alloc(8 + 32 + 8 + 8 + 1 + 1);
+  EXPIRY_PRICE_DISCRIMINATOR.copy(data, 0);
+  underlying.toBuffer().copy(data, 8);
+  data.writeBigInt64LE(BigInt(expiry.toString()), 40);
+  data.writeBigUInt64LE(BigInt(price.toString()), 48);
+  data.writeUInt8(1, 56);
+  data.writeUInt8(bump, 57);
+  context.setAccount(pda, {
+    lamports: LAMPORTS_PER_SOL,
+    data,
+    owner: oracleProgramId,
+    executable: false,
+  });
+}
 
 // Inject a MakerOTokenBalance PDA directly (skips execute_order setup).
 function injectMakerBalance(
@@ -227,6 +299,7 @@ interface Scenario {
   settlerConfigPda: PublicKey;
   poolTokenAccount: PublicKey;
   poolVaultAuthPda: PublicKey;
+  vaultPda: PublicKey;
 
   settlerOtokenAccount: PublicKey;
   settlerCollateralAccount: PublicKey;
@@ -287,14 +360,23 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     require("../target/idl/whitelist.json"),
     provider as unknown as anchor.AnchorProvider
   );
+  const otokenFactoryProgram = new Program(
+    require("../target/idl/otoken_factory.json"),
+    provider as unknown as anchor.AnchorProvider
+  );
   const mockJupiterProgram = new Program(
     require("../target/idl/mock_jupiter.json"),
+    provider as unknown as anchor.AnchorProvider
+  );
+  const oracleProgram = new Program(
+    require("../target/idl/oracle.json"),
     provider as unknown as anchor.AnchorProvider
   );
 
   const controllerConfigPda = findControllerConfigPda(controllerProgram.programId);
   const settlerConfigPda = findSettlerConfigPda(batchSettlerProgram.programId);
   const whitelistConfigPda = findWhitelistConfigPda(whitelistProgram.programId);
+  const factoryConfigPda = findFactoryConfigPda(otokenFactoryProgram.programId);
 
   // Underlying / strike-asset / collateral mints. For PUT, collateral
   // is the strike asset (USDC-like). For CALL, collateral is the
@@ -314,8 +396,60 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
   const collateralMint = opts.isPut ? strikeAssetMint : underlyingMint;
   const contraMint = opts.isPut ? underlyingMint : strikeAssetMint;
 
-  // oToken mint authority is the controller's config PDA.
-  const otokenMint = await bankrunCreateMint(context, admin, controllerConfigPda, 8);
+  const clock = await context.banksClient.getClock();
+  const expiryTimestamp = new BN(Number(clock.unixTimestamp) + 100);
+  const strikePrice = new BN(opts.strikeUsd).mul(new BN(100_000_000)); // 8 dec
+
+  await otokenFactoryProgram.methods
+    .initialize(admin.publicKey)
+    .accounts({ payer: admin.publicKey })
+    .signers([admin])
+    .rpc();
+  await otokenFactoryProgram.methods
+    .setController(controllerConfigPda)
+    .accounts({ admin: admin.publicKey })
+    .signers([admin])
+    .rpc();
+
+  const factoryOtokenPda = findFactoryOTokenPda(
+    underlyingMint,
+    strikeAssetMint,
+    collateralMint,
+    strikePrice,
+    expiryTimestamp,
+    opts.isPut,
+    otokenFactoryProgram.programId
+  );
+  const otokenMint = findFactoryOTokenMintPda(
+    underlyingMint,
+    strikeAssetMint,
+    collateralMint,
+    strikePrice,
+    expiryTimestamp,
+    opts.isPut,
+    otokenFactoryProgram.programId
+  );
+
+  await otokenFactoryProgram.methods
+    .createOtoken(
+      underlyingMint,
+      strikeAssetMint,
+      collateralMint,
+      strikePrice,
+      expiryTimestamp,
+      opts.isPut
+    )
+    .accounts({
+      factoryConfig: factoryConfigPda,
+      otoken: factoryOtokenPda,
+      otokenMint,
+      controllerAuthority: controllerConfigPda,
+      admin: admin.publicKey,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([admin])
+    .rpc();
 
   // Whitelist + whitelist oToken
   await whitelistProgram.methods
@@ -342,30 +476,19 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     .signers([admin])
     .rpc();
 
-  // OTokenInfo with near-future expiry
-  const clock = await context.banksClient.getClock();
-  const expiryTimestamp = new BN(Number(clock.unixTimestamp) + 100);
   const otokenInfoPda = findOTokenInfoPda(otokenMint, controllerProgram.programId);
 
-  const strikePrice = new BN(opts.strikeUsd).mul(new BN(100_000_000)); // 8 dec
-
   await controllerProgram.methods
-    .createOtokenInfo(
-      otokenMint,
-      underlyingMint,
-      strikeAssetMint,
-      collateralMint,
-      strikePrice,
-      expiryTimestamp,
-      opts.isPut,
-      opts.collateralDecimals
-    )
+    .createOtokenInfo()
     .accounts({
       config: controllerConfigPda,
       otokenInfo: otokenInfoPda,
       otokenMint,
+      factoryOtoken: factoryOtokenPda,
+      collateralMintAccount: collateralMint,
       whitelistedOtoken: wlOtokenPda,
       whitelistProgram: whitelistProgram.programId,
+      factoryProgram: otokenFactoryProgram.programId,
       admin: admin.publicKey,
       systemProgram: SystemProgram.programId,
     })
@@ -414,6 +537,7 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
       vault: vaultPda,
       userTokenAccount: adminCollateralAccount,
       poolTokenAccount,
+      poolVaultAuthority: poolVaultAuthPda,
       owner: admin.publicKey,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
@@ -555,9 +679,32 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
   }
   if (opts.setExpiryPrice) {
     const expiryPrice = new BN(opts.expiryPriceUsd).mul(new BN(100_000_000));
+    const [oracleExpiryPricePda, oracleExpiryPriceBump] =
+      PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("expiry_price"),
+          underlyingMint.toBuffer(),
+          expiryTimestamp.toArrayLike(Buffer, "le", 8),
+        ],
+        oracleProgram.programId
+      );
+    injectOracleExpiryPrice(
+      context,
+      oracleExpiryPricePda,
+      oracleProgram.programId,
+      underlyingMint,
+      expiryTimestamp,
+      expiryPrice,
+      oracleExpiryPriceBump
+    );
     await controllerProgram.methods
-      .setExpiryPrice(expiryPrice)
-      .accounts({ admin: admin.publicKey, otokenInfo: otokenInfoPda })
+      .setExpiryPrice()
+      .accounts({
+        admin: admin.publicKey,
+        otokenInfo: otokenInfoPda,
+        oracleExpiryPrice: oracleExpiryPricePda,
+        oracleProgram: oracleProgram.programId,
+      })
       .signers([admin])
       .rpc();
   }
@@ -592,6 +739,7 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     settlerConfigPda,
     poolTokenAccount,
     poolVaultAuthPda,
+    vaultPda,
     settlerOtokenAccount,
     settlerCollateralAccount,
     settlerContraAccount,
@@ -657,7 +805,7 @@ function buildMockSplitRoute(
 
 async function callPhysicalRedeem(s: Scenario, route: { data: Buffer; accounts: any[] }) {
   return s.batchSettlerProgram.methods
-    .physicalRedeem(s.amount, Buffer.from(route.data))
+    .physicalRedeem(s.amount, new BN("18446744073709551615"), Buffer.from(route.data))
     .accounts({
       settlerConfig: s.settlerConfigPda,
       operator: s.operator.publicKey,
@@ -665,6 +813,7 @@ async function callPhysicalRedeem(s: Scenario, route: { data: Buffer; accounts: 
       controllerConfig: s.controllerConfigPda,
       otokenInfo: s.otokenInfoPda,
       otokenMint: s.otokenMint,
+      vault: s.vaultPda,
       settlerOtokenAccount: s.settlerOtokenAccount,
       settlerCollateralAccount: s.settlerCollateralAccount,
       contraMint: s.contraMint,
@@ -774,7 +923,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       const route = buildMockSwapRoute(s, s.contraAmount, s.contraAmount, s.userContraAccount);
       try {
         await s.batchSettlerProgram.methods
-          .physicalRedeem(s.amount, Buffer.from(route.data))
+          .physicalRedeem(s.amount, new BN("18446744073709551615"), Buffer.from(route.data))
           .accounts({
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
@@ -782,6 +931,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
             contraMint: wrongMint, // ← mismatch
@@ -1027,7 +1177,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       const route = buildMockSwapRoute(s, 1n, 1n, s.userContraAccount);
       try {
         await s.batchSettlerProgram.methods
-          .physicalRedeem(new BN(0), Buffer.from(route.data))
+          .physicalRedeem(new BN(0), new BN("18446744073709551615"), Buffer.from(route.data))
           .accounts({
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
@@ -1035,6 +1185,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
             contraMint: s.contraMint,
@@ -1063,7 +1214,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
       try {
         await s.batchSettlerProgram.methods
-          .physicalRedeem(tooMuch, Buffer.from(route.data))
+          .physicalRedeem(tooMuch, new BN("18446744073709551615"), Buffer.from(route.data))
           .accounts({
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
@@ -1071,6 +1222,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
             contraMint: s.contraMint,
@@ -1100,7 +1252,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       // and not equal to settler_config.jupiter_program.
       try {
         await s.batchSettlerProgram.methods
-          .physicalRedeem(s.amount, Buffer.from(route.data))
+          .physicalRedeem(s.amount, new BN("18446744073709551615"), Buffer.from(route.data))
           .accounts({
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
@@ -1108,6 +1260,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
             contraMint: s.contraMint,
@@ -1144,7 +1297,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
       try {
         await s.batchSettlerProgram.methods
-          .physicalRedeem(s.amount, Buffer.from(route.data))
+          .physicalRedeem(s.amount, new BN("18446744073709551615"), Buffer.from(route.data))
           .accounts({
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
@@ -1152,6 +1305,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
             contraMint: s.contraMint,
