@@ -794,7 +794,11 @@ pub struct Redeem<'info> {
         bump,
     )]
     pub pool_vault_authority: AccountInfo<'info>,
-    #[account(mut)]
+    /// Read-only signer: redeem only burns from `redeemer_otoken_account`
+    /// using `redeemer` as the SPL token authority, and never debits
+    /// lamports from this account. Marking it `mut` would force every
+    /// caller (including PDAs CPI'd from other programs) to also pass
+    /// it as writable in their outer context, causing privilege escalation.
     pub redeemer: Signer<'info>,
     pub token_program: Program<'info, Token>,
 }
