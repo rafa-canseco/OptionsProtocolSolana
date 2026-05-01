@@ -298,6 +298,7 @@ describe("post-expiry instructions", () => {
         vault: vaultPda,
         userTokenAccount: adminCollateralAccount,
         poolTokenAccount: poolTokenAccount,
+        poolVaultAuthority: poolVaultAuthPda,
         owner: admin.publicKey,
         tokenProgram: TOKEN_PROGRAM_ID,
       })

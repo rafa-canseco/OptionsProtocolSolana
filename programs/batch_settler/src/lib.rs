@@ -130,6 +130,7 @@ pub mod batch_settler {
         quote_id: u64,
         max_amount: u64,
         maker_nonce: u64,
+        premium_mint: Pubkey,
         collateral_amount: u64,
         collateral_mint: Pubkey,
     ) -> Result<()> {
@@ -145,6 +146,7 @@ pub mod batch_settler {
             quote_id,
             max_amount,
             maker_nonce,
+            &premium_mint,
         );
         verify_ed25519_signature(
             &ctx.accounts.instructions_sysvar,
@@ -187,6 +189,8 @@ pub mod batch_settler {
         let vault_mm = &mut ctx.accounts.vault_mm;
         vault_mm.maker = ctx.accounts.maker.key();
         vault_mm.vault = ctx.accounts.vault.key();
+        vault_mm.otoken_mint = ctx.accounts.otoken_mint.key();
+        vault_mm.remaining_amount = amount;
         vault_mm.bump = ctx.bumps.vault_mm;
 
         transfer_premium(&ctx, signer_seeds, net, fee)?;
@@ -513,12 +517,16 @@ pub mod batch_settler {
     pub fn clear_mm_balance_for_vault(ctx: Context<ClearMMBalance>) -> Result<()> {
         require!(ctx.accounts.vault.settled, SettlerError::VaultNotSettled);
 
-        let vault_mm = &ctx.accounts.vault_mm;
+        let vault_mm = &mut ctx.accounts.vault_mm;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
 
-        let to_clear = mm_bal.balance;
+        let to_clear = vault_mm.remaining_amount.min(mm_bal.balance);
         if to_clear > 0 {
-            mm_bal.balance = 0;
+            mm_bal.balance = mm_bal
+                .balance
+                .checked_sub(to_clear)
+                .ok_or(SettlerError::MathOverflow)?;
+            vault_mm.remaining_amount = 0;
             emit!(MMBalanceCleared {
                 maker: vault_mm.maker,
                 otoken_mint: mm_bal.otoken_mint,
@@ -541,6 +549,7 @@ pub mod batch_settler {
     pub fn physical_redeem(
         ctx: Context<PhysicalRedeem>,
         amount: u64,
+        max_collateral_spent: u64,
         jupiter_route_data: Vec<u8>,
     ) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
@@ -587,6 +596,16 @@ pub mod batch_settler {
             ctx.accounts.maker_otoken_balance.balance >= amount,
             SettlerError::InsufficientMMBalance
         );
+        require!(
+            ctx.accounts.vault_mm.remaining_amount >= amount,
+            SettlerError::InsufficientMMBalance
+        );
+        ctx.accounts.vault_mm.remaining_amount = ctx
+            .accounts
+            .vault_mm
+            .remaining_amount
+            .checked_sub(amount)
+            .ok_or(SettlerError::MathOverflow)?;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
         mm_bal.balance = mm_bal
             .balance
@@ -629,6 +648,10 @@ pub mod batch_settler {
         let collateral_used = collateral_after_redeem
             .checked_sub(collateral_after_swap)
             .ok_or(SettlerError::MathOverflow)?;
+        require!(
+            collateral_used <= max_collateral_spent,
+            SettlerError::ExcessCollateralUsed
+        );
         let user_contra_delta = user_contra_after
             .checked_sub(user_contra_before)
             .ok_or(SettlerError::MathOverflow)?;
@@ -650,10 +673,7 @@ pub mod batch_settler {
             // The route must consume some collateral as input. A
             // zero-input swap delivering contra to the user is a
             // signal Jupiter sourced funds elsewhere — refuse it.
-            require!(
-                collateral_used > 0,
-                SettlerError::UnexpectedSwapDestination
-            );
+            require!(collateral_used > 0, SettlerError::UnexpectedSwapDestination);
 
             // Surplus collateral (collateral_mint) → MM.
             let surplus_collateral = collateral_received
@@ -759,6 +779,8 @@ pub struct SettlerConfig {
 pub struct VaultMM {
     pub maker: Pubkey,
     pub vault: Pubkey,
+    pub otoken_mint: Pubkey,
+    pub remaining_amount: u64,
     pub bump: u8,
 }
 
@@ -870,6 +892,7 @@ pub struct CancelQuote<'info> {
         seeds = [
             b"quote_fill",
             maker.key().as_ref(),
+            &maker_state.nonce.to_le_bytes(),
             &quote_id.to_le_bytes(),
         ],
         bump,
@@ -894,6 +917,7 @@ pub struct CancelQuote<'info> {
     quote_id: u64,
     max_amount: u64,
     maker_nonce: u64,
+    premium_mint: Pubkey,
     collateral_amount: u64,
     collateral_mint: Pubkey,
 )]
@@ -945,8 +969,25 @@ pub struct ExecuteOrder<'info> {
     )]
     pub user_collateral_account: Box<Account<'info, TokenAccount>>,
     /// Controller pool receiving collateral
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = pool_token_account.mint == collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = pool_token_account.owner
+            == pool_vault_authority.key()
+            @ SettlerError::Unauthorized,
+    )]
     pub pool_token_account: Box<Account<'info, TokenAccount>>,
+    /// CHECK: Controller pool vault authority PDA.
+    #[account(
+        seeds = [
+            b"pool_vault_auth",
+            collateral_mint.as_ref(),
+        ],
+        bump,
+        seeds::program = controller_program.key(),
+    )]
+    pub pool_vault_authority: AccountInfo<'info>,
     /// Settler's oToken account (custody for MM, owned by settler PDA)
     #[account(
         mut,
@@ -965,6 +1006,8 @@ pub struct ExecuteOrder<'info> {
         mut,
         constraint = mm_premium_account.owner == maker.key()
             @ SettlerError::InvalidCustodyAccount,
+        constraint = mm_premium_account.mint == premium_mint
+            @ SettlerError::InvalidCustodyAccount,
     )]
     pub mm_premium_account: Box<Account<'info, TokenAccount>>,
     /// User receives net premium here. Must belong to the signing user.
@@ -972,6 +1015,8 @@ pub struct ExecuteOrder<'info> {
         mut,
         constraint = user_premium_account.owner == user.key()
             @ SettlerError::Unauthorized,
+        constraint = user_premium_account.mint == premium_mint
+            @ SettlerError::InvalidCustodyAccount,
     )]
     pub user_premium_account: Box<Account<'info, TokenAccount>>,
     /// Treasury receives protocol fee here
@@ -979,6 +1024,8 @@ pub struct ExecuteOrder<'info> {
         mut,
         constraint = treasury_account.owner
             == settler_config.treasury
+            @ SettlerError::InvalidTreasury,
+        constraint = treasury_account.mint == premium_mint
             @ SettlerError::InvalidTreasury,
     )]
     pub treasury_account: Box<Account<'info, TokenAccount>>,
@@ -1001,7 +1048,7 @@ pub struct ExecuteOrder<'info> {
     #[account(
         init,
         payer = user,
-        space = 8 + 32 + 32 + 1,
+        space = 8 + 32 + 32 + 32 + 8 + 1,
         seeds = [b"vault_mm", vault.key().as_ref()],
         bump,
     )]
@@ -1012,7 +1059,6 @@ pub struct ExecuteOrder<'info> {
     pub user: Signer<'info>,
     /// CHECK: Ed25519 signature verified via instruction introspection
     pub maker: AccountInfo<'info>,
-
     pub controller_program: Program<'info, ControllerProgram>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1275,6 +1321,7 @@ pub struct ClearMMBalance<'info> {
     pub caller: Signer<'info>,
 
     #[account(
+        mut,
         seeds = [b"vault_mm", vault_mm.vault.as_ref()],
         bump = vault_mm.bump,
     )]
@@ -1292,9 +1339,11 @@ pub struct ClearMMBalance<'info> {
         seeds = [
             b"mm_balance",
             vault_mm.maker.as_ref(),
-            maker_otoken_balance.otoken_mint.as_ref(),
+            vault_mm.otoken_mint.as_ref(),
         ],
         bump = maker_otoken_balance.bump,
+        constraint = maker_otoken_balance.otoken_mint == vault.otoken_mint
+            @ SettlerError::InvalidCustodyAccount,
     )]
     pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
 }
@@ -1362,6 +1411,28 @@ pub struct PhysicalRedeem<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_contra_account: Box<Account<'info, TokenAccount>>,
+    /// CHECK: User identity. user_contra_account is bound to this key,
+    /// and vault.beneficiary must match it.
+    pub user: AccountInfo<'info>,
+    #[account(
+        constraint = vault.otoken_mint == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = vault.beneficiary == user.key()
+            @ SettlerError::Unauthorized,
+    )]
+    pub vault: Account<'info, controller::Vault>,
+    #[account(
+        mut,
+        seeds = [b"vault_mm", vault.key().as_ref()],
+        bump = vault_mm.bump,
+        constraint = vault_mm.vault == vault.key()
+            @ SettlerError::Unauthorized,
+        constraint = vault_mm.maker == maker_otoken_balance.maker
+            @ SettlerError::Unauthorized,
+        constraint = vault_mm.otoken_mint == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub vault_mm: Account<'info, VaultMM>,
     /// User's contra-asset destination. For PUT this is the direct
     /// Jupiter swap output; for CALL this is paid from settler_contra
     /// after the swap. Owner must match `user`.
@@ -1373,8 +1444,6 @@ pub struct PhysicalRedeem<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub user_contra_account: Box<Account<'info, TokenAccount>>,
-    /// CHECK: User identity. user_contra_account is bound to this key.
-    pub user: AccountInfo<'info>,
     /// MM receives surplus. Owner must be the maker the option was
     /// custodied for. Mint must match the surplus asset:
     ///   PUT  → otoken_info.collateral_mint
@@ -1564,6 +1633,8 @@ pub enum SettlerError {
     UnexpectedSwapDestination,
     #[msg("Controller redeem returned zero collateral")]
     RedeemReturnedZero,
+    #[msg("Collateral used exceeds max_collateral_spent")]
+    ExcessCollateralUsed,
 }
 
 // ============================================================
@@ -1613,9 +1684,11 @@ fn build_quote_message(
     quote_id: u64,
     max_amount: u64,
     maker_nonce: u64,
+    premium_mint: &Pubkey,
 ) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(72);
+    let mut msg = Vec::with_capacity(104);
     msg.extend_from_slice(otoken_mint.as_ref());
+    msg.extend_from_slice(premium_mint.as_ref());
     msg.extend_from_slice(&bid_price.to_le_bytes());
     msg.extend_from_slice(&deadline.to_le_bytes());
     msg.extend_from_slice(&quote_id.to_le_bytes());
@@ -1728,6 +1801,7 @@ fn cpi_deposit_collateral(
                 vault: ctx.accounts.vault.to_account_info(),
                 user_token_account: ctx.accounts.user_collateral_account.to_account_info(),
                 pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
                 token_program: ctx.accounts.token_program.to_account_info(),
             },
@@ -1930,4 +2004,3 @@ fn invoke_jupiter_swap(
     anchor_lang::solana_program::program::invoke_signed(&jupiter_ix, &account_infos, signer_seeds)
         .map_err(Into::into)
 }
-

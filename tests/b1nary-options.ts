@@ -21,7 +21,6 @@ import {
   approve,
 } from "@solana/spl-token";
 import { assert } from "chai";
-import { AddressBook } from "../target/types/address_book";
 import { MarginPool } from "../target/types/margin_pool";
 import { Controller } from "../target/types/controller";
 import { OtokenFactory } from "../target/types/otoken_factory";
@@ -29,13 +28,6 @@ import { BatchSettler } from "../target/types/batch_settler";
 import { Whitelist } from "../target/types/whitelist";
 
 const ZERO_PUBKEY = PublicKey.default;
-
-function findRegistryPda(programId: PublicKey): [PublicKey, number] {
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from("registry")],
-    programId
-  );
-}
 
 function findMarginPoolConfigPda(
   programId: PublicKey
@@ -187,12 +179,14 @@ function findMakerStatePda(
 function findQuoteFillPda(
   maker: PublicKey,
   quoteId: BN,
+  makerNonce: BN,
   programId: PublicKey
 ): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from("quote_fill"),
       maker.toBuffer(),
+      makerNonce.toArrayLike(Buffer, "le", 8),
       quoteId.toArrayLike(Buffer, "le", 8),
     ],
     programId
@@ -265,8 +259,6 @@ describe("b1nary-options", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const addressBookProgram = anchor.workspace
-    .addressBook as Program<AddressBook>;
   const marginPoolProgram = anchor.workspace
     .marginPool as Program<MarginPool>;
   const controllerProgram = anchor.workspace
@@ -280,209 +272,6 @@ describe("b1nary-options", () => {
 
   const admin = provider.wallet as anchor.Wallet;
   const connection = provider.connection;
-
-  // ───────────────────────────────────────────
-  // AddressBook tests
-  // ───────────────────────────────────────────
-  describe("address_book", () => {
-    const [registryPda] = findRegistryPda(
-      addressBookProgram.programId
-    );
-
-    it("initializes registry with admin", async () => {
-      await addressBookProgram.methods
-        .initialize(admin.publicKey)
-        .accounts({
-          payer: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.admin.equals(admin.publicKey),
-        "admin matches"
-      );
-      assert.ok(
-        registry.pendingAdmin.equals(ZERO_PUBKEY),
-        "pending admin is zero"
-      );
-      assert.ok(
-        registry.controller.equals(ZERO_PUBKEY),
-        "controller starts zero"
-      );
-    });
-
-    it("rejects zero address on initialize", async () => {
-      try {
-        await addressBookProgram.methods
-          .setAddress({ controller: {} }, ZERO_PUBKEY)
-          .accounts({
-            admin: admin.publicKey,
-          })
-          .rpc();
-        assert.fail("should have rejected zero address");
-      } catch (err: any) {
-        assert.include(
-          err.toString(),
-          "Address cannot be zero"
-        );
-      }
-    });
-
-    it("sets controller address and verifies storage", async () => {
-      const controllerAddr = Keypair.generate().publicKey;
-      await addressBookProgram.methods
-        .setAddress({ controller: {} }, controllerAddr)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.controller.equals(controllerAddr),
-        "controller stored"
-      );
-    });
-
-    it("sets margin pool address", async () => {
-      const marginPoolAddr = Keypair.generate().publicKey;
-      await addressBookProgram.methods
-        .setAddress({ marginPool: {} }, marginPoolAddr)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.marginPool.equals(marginPoolAddr),
-        "margin pool stored"
-      );
-    });
-
-    it("sets oracle address", async () => {
-      const oracleAddr = Keypair.generate().publicKey;
-      await addressBookProgram.methods
-        .setAddress({ oracle: {} }, oracleAddr)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      const registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.oracle.equals(oracleAddr),
-        "oracle stored"
-      );
-    });
-
-    it("rejects set_address from non-admin", async () => {
-      const imposter = Keypair.generate();
-      await fundAccount(
-        provider,
-        imposter.publicKey,
-        LAMPORTS_PER_SOL
-      );
-
-      try {
-        await addressBookProgram.methods
-          .setAddress(
-            { controller: {} },
-            Keypair.generate().publicKey
-          )
-          .accounts({
-            admin: imposter.publicKey,
-          })
-          .signers([imposter])
-          .rpc();
-        assert.fail("should reject non-admin");
-      } catch (err: any) {
-        assert.include(
-          err.toString(),
-          "AnchorError caused by account: registry"
-        );
-      }
-    });
-
-    it("transfers ownership (two-step: start + accept)", async () => {
-      const newAdmin = Keypair.generate();
-      await fundAccount(
-        provider,
-        newAdmin.publicKey,
-        LAMPORTS_PER_SOL
-      );
-
-      await addressBookProgram.methods
-        .transferOwnership(newAdmin.publicKey)
-        .accounts({
-          admin: admin.publicKey,
-        })
-        .rpc();
-
-      let registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.pendingAdmin.equals(newAdmin.publicKey),
-        "pending admin set"
-      );
-      assert.ok(
-        registry.admin.equals(admin.publicKey),
-        "admin unchanged until accepted"
-      );
-
-      await addressBookProgram.methods
-        .acceptOwnership()
-        .accounts({
-          newAdmin: newAdmin.publicKey,
-        })
-        .signers([newAdmin])
-        .rpc();
-
-      registry =
-        await addressBookProgram.account.registry.fetch(
-          registryPda
-        );
-      assert.ok(
-        registry.admin.equals(newAdmin.publicKey),
-        "ownership transferred"
-      );
-      assert.ok(
-        registry.pendingAdmin.equals(ZERO_PUBKEY),
-        "pending admin cleared"
-      );
-
-      // Transfer back for remaining tests
-      await addressBookProgram.methods
-        .transferOwnership(admin.publicKey)
-        .accounts({
-          admin: newAdmin.publicKey,
-        })
-        .signers([newAdmin])
-        .rpc();
-
-      await addressBookProgram.methods
-        .acceptOwnership()
-        .accounts({
-          newAdmin: admin.publicKey,
-        })
-        .rpc();
-    });
-  });
 
   // ───────────────────────────────────────────
   // MarginPool tests
@@ -984,6 +773,7 @@ describe("b1nary-options", () => {
           vault: vaultPda,
           userTokenAccount: userCollateralAccount,
           poolTokenAccount: poolTokenAccount,
+          poolVaultAuthority: poolVaultAuthPda,
           owner: admin.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
@@ -1017,6 +807,7 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -1372,6 +1163,7 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -1449,6 +1241,7 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
@@ -2070,9 +1863,14 @@ describe("b1nary-options", () => {
 
     it("cancels a quote", async () => {
       const quoteId = new BN(42);
+      const [makerStatePda] = findMakerStatePda(
+        maker.publicKey,
+        batchSettlerProgram.programId
+      );
       await batchSettlerProgram.methods
         .cancelQuote(quoteId)
         .accounts({
+          makerState: makerStatePda,
           maker: maker.publicKey,
         })
         .signers([maker])
@@ -2081,6 +1879,7 @@ describe("b1nary-options", () => {
       const [quoteFillPda] = findQuoteFillPda(
         maker.publicKey,
         quoteId,
+        new BN(0),
         batchSettlerProgram.programId
       );
       const fill =
@@ -2244,19 +2043,21 @@ describe("b1nary-options", () => {
 
       function buildQuoteMessage(
         mint: PublicKey,
+        premium: PublicKey,
         price: BN,
         dl: BN,
         qid: BN,
         maxAmt: BN,
         nonce: BN
       ): Buffer {
-        const msg = Buffer.alloc(72);
+        const msg = Buffer.alloc(104);
         mint.toBuffer().copy(msg, 0);
-        msg.writeBigUInt64LE(BigInt(price.toString()), 32);
-        msg.writeBigInt64LE(BigInt(dl.toString()), 40);
-        msg.writeBigUInt64LE(BigInt(qid.toString()), 48);
-        msg.writeBigUInt64LE(BigInt(maxAmt.toString()), 56);
-        msg.writeBigUInt64LE(BigInt(nonce.toString()), 64);
+        premium.toBuffer().copy(msg, 32);
+        msg.writeBigUInt64LE(BigInt(price.toString()), 64);
+        msg.writeBigInt64LE(BigInt(dl.toString()), 72);
+        msg.writeBigUInt64LE(BigInt(qid.toString()), 80);
+        msg.writeBigUInt64LE(BigInt(maxAmt.toString()), 88);
+        msg.writeBigUInt64LE(BigInt(nonce.toString()), 96);
         return msg;
       }
 
@@ -2408,7 +2209,7 @@ describe("b1nary-options", () => {
 
       it("executes order: user sells option, MM buys", async () => {
         const message = buildQuoteMessage(
-          otokenMint, bidPrice, deadline,
+          otokenMint, premiumMint, bidPrice, deadline,
           quoteId, maxAmount, makerNonce
         );
 
@@ -2420,6 +2221,7 @@ describe("b1nary-options", () => {
 
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey, quoteId,
+          makerNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2431,6 +2233,7 @@ describe("b1nary-options", () => {
             .executeOrder(
               orderAmount, bidPrice, deadline,
               quoteId, maxAmount, makerNonce,
+              premiumMint,
               collateralAmount, collateralMint
             )
             .accounts({
@@ -2544,6 +2347,7 @@ describe("b1nary-options", () => {
         // Quote fill tracking
         const [quoteFillPda2] = findQuoteFillPda(
           maker.publicKey, quoteId,
+          makerNonce,
           batchSettlerProgram.programId
         );
         const fill =
@@ -2698,6 +2502,7 @@ describe("b1nary-options", () => {
 
         const message = buildQuoteMessage(
           otokenMint,
+          premiumMint,
           bidPrice,
           deadline,
           newQuoteId,
@@ -2712,6 +2517,7 @@ describe("b1nary-options", () => {
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey,
           newQuoteId,
+          currentNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2737,6 +2543,7 @@ describe("b1nary-options", () => {
             newQuoteId,
             maxAmount,
             currentNonce,
+            premiumMint,
             collateralAmount,
             collateralMint
           )
@@ -2848,6 +2655,7 @@ describe("b1nary-options", () => {
 
         const message = buildQuoteMessage(
           otokenMint,
+          premiumMint,
           bidPrice,
           deadline,
           newQuoteId,
@@ -2862,6 +2670,7 @@ describe("b1nary-options", () => {
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey,
           newQuoteId,
+          currentNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2887,6 +2696,7 @@ describe("b1nary-options", () => {
             newQuoteId,
             maxAmount,
             currentNonce,
+            premiumMint,
             collateralAmount,
             collateralMint
           )
@@ -2958,7 +2768,7 @@ describe("b1nary-options", () => {
         const staleNonce = new BN(1);
         const newQuoteId = new BN(200);
         const message = buildQuoteMessage(
-          otokenMint, bidPrice, deadline,
+          otokenMint, premiumMint, bidPrice, deadline,
           newQuoteId, maxAmount, staleNonce
         );
 
@@ -2970,6 +2780,7 @@ describe("b1nary-options", () => {
 
         const [quoteFillPda] = findQuoteFillPda(
           maker.publicKey, newQuoteId,
+          staleNonce,
           batchSettlerProgram.programId
         );
         const [makerStatePda] = findMakerStatePda(
@@ -2989,6 +2800,7 @@ describe("b1nary-options", () => {
             .executeOrder(
               orderAmount, bidPrice, deadline,
               newQuoteId, maxAmount, staleNonce,
+              premiumMint,
               collateralAmount, collateralMint
             )
             .accounts({

@@ -18,6 +18,10 @@ pub mod oracle {
         price_deviation_threshold_bps: u16,
     ) -> Result<()> {
         require!(admin != Pubkey::default(), OracleError::ZeroAddress);
+        require!(
+            price_deviation_threshold_bps > 0,
+            OracleError::InvalidDeviationThreshold
+        );
         let config = &mut ctx.accounts.config;
         config.admin = admin;
         config.pending_admin = Pubkey::default();
@@ -58,6 +62,16 @@ pub mod oracle {
         Ok(())
     }
 
+    pub fn set_feed_active(ctx: Context<DeregisterFeed>, active: bool) -> Result<()> {
+        let feed = &mut ctx.accounts.feed;
+        feed.active = active;
+        emit!(PriceFeedStatusUpdated {
+            underlying: feed.underlying,
+            active,
+        });
+        Ok(())
+    }
+
     /// Read and validate Pyth price for a registered underlying.
     /// Returns the price normalized to 8 decimal places.
     pub fn get_price(ctx: Context<GetPrice>) -> Result<u64> {
@@ -86,8 +100,8 @@ pub mod oracle {
     /// Lock expiry price for settlement. The PDA [expiry_price,
     /// underlying, expiry] can only be created once — attempting to
     /// set the same underlying+expiry again fails (Anchor `init`).
-    /// Validates submitted price against Pyth live feed when
-    /// deviation threshold > 0 and feed is active.
+    /// Validates submitted price against Pyth live feed and requires
+    /// an active feed plus a non-zero deviation threshold.
     pub fn set_expiry_price(
         ctx: Context<SetExpiryPrice>,
         underlying: Pubkey,
@@ -105,21 +119,23 @@ pub mod oracle {
         let config = &ctx.accounts.config;
         let feed = &ctx.accounts.feed;
 
-        // Validate against Pyth if threshold set and feed is active
-        // (matches EVM: skip if no feed or threshold == 0)
-        if config.price_deviation_threshold_bps > 0 && feed.active {
-            let pyth = parse_pyth_price_update(
-                &ctx.accounts.pyth_price_update,
-                &config.pyth_receiver_program,
-                &feed.pyth_feed_id,
-            )?;
+        require!(feed.active, OracleError::FeedNotActive);
+        require!(
+            config.price_deviation_threshold_bps > 0,
+            OracleError::InvalidDeviationThreshold
+        );
 
-            validate_staleness(pyth.publish_time, config.max_staleness_secs)?;
+        let pyth = parse_pyth_price_update(
+            &ctx.accounts.pyth_price_update,
+            &config.pyth_receiver_program,
+            &feed.pyth_feed_id,
+        )?;
 
-            let pyth_normalized = normalize_to_8_decimals(pyth.price, pyth.exponent)?;
+        validate_staleness(pyth.publish_time, config.max_staleness_secs)?;
 
-            validate_price_deviation(price, pyth_normalized, config.price_deviation_threshold_bps)?;
-        }
+        let pyth_normalized = normalize_to_8_decimals(pyth.price, pyth.exponent)?;
+
+        validate_price_deviation(price, pyth_normalized, config.price_deviation_threshold_bps)?;
 
         let ep = &mut ctx.accounts.expiry_price;
         ep.underlying = underlying;
@@ -159,6 +175,7 @@ pub mod oracle {
         ctx: Context<AdminAction>,
         threshold_bps: u16,
     ) -> Result<()> {
+        require!(threshold_bps > 0, OracleError::InvalidDeviationThreshold);
         emit!(PriceDeviationThresholdUpdated {
             old: ctx.accounts.config.price_deviation_threshold_bps,
             new: threshold_bps,
@@ -415,6 +432,12 @@ pub struct PriceFeedDeregistered {
 }
 
 #[event]
+pub struct PriceFeedStatusUpdated {
+    pub underlying: Pubkey,
+    pub active: bool,
+}
+
+#[event]
 pub struct PriceQueried {
     pub underlying: Pubkey,
     pub price: u64,
@@ -485,6 +508,8 @@ pub enum OracleError {
     ConfidenceTooWide,
     #[msg("Price deviation exceeds threshold")]
     PriceDeviationTooHigh,
+    #[msg("Price deviation threshold must be greater than zero")]
+    InvalidDeviationThreshold,
     #[msg("Expiry timestamp not reached")]
     ExpiryNotReached,
     #[msg("Expiry price not set")]
@@ -526,6 +551,7 @@ struct PythPriceData {
 ///     ...remaining fields (not needed)
 ///   posted_slot    : u64
 const DISCRIMINATOR_LEN: usize = 8;
+const PRICE_UPDATE_V2_DISCRIMINATOR: [u8; 8] = [0x34, 0x2a, 0x89, 0x6f, 0xc1, 0xd0, 0x82, 0x04];
 const PUBKEY_LEN: usize = 32;
 const FEED_ID_LEN: usize = 32;
 const MIN_PRICE_MSG_BYTES: usize = FEED_ID_LEN + 8 + 8 + 4 + 8;
@@ -545,6 +571,10 @@ fn parse_pyth_price_update(
     // discriminator(8) + write_authority(32) + min verification(1) +
     // price_message(60) = 101 minimum
     require!(data.len() >= 101, OracleError::InvalidPythAccount);
+    require!(
+        data[..DISCRIMINATOR_LEN] == PRICE_UPDATE_V2_DISCRIMINATOR,
+        OracleError::InvalidPythAccount
+    );
 
     // Offset past discriminator + write_authority
     let base = DISCRIMINATOR_LEN + PUBKEY_LEN;

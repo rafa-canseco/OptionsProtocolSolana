@@ -22,56 +22,6 @@ pub mod whitelist {
         Ok(())
     }
 
-    pub fn whitelist_underlying(
-        ctx: Context<WhitelistAsset>,
-        mint: Pubkey,
-        symbol: [u8; 8],
-    ) -> Result<()> {
-        let asset = &mut ctx.accounts.asset;
-        asset.mint = mint;
-        asset.symbol = symbol;
-        asset.asset_type = AssetType::Underlying;
-        asset.active = true;
-        emit!(UnderlyingWhitelisted { mint });
-        Ok(())
-    }
-
-    pub fn whitelist_collateral(
-        ctx: Context<WhitelistAsset>,
-        mint: Pubkey,
-        symbol: [u8; 8],
-    ) -> Result<()> {
-        let asset = &mut ctx.accounts.asset;
-        asset.mint = mint;
-        asset.symbol = symbol;
-        asset.asset_type = AssetType::Collateral;
-        asset.active = true;
-        emit!(CollateralWhitelisted { mint });
-        Ok(())
-    }
-
-    pub fn whitelist_product(
-        ctx: Context<WhitelistProduct>,
-        underlying: Pubkey,
-        strike_asset: Pubkey,
-        collateral: Pubkey,
-        is_put: bool,
-    ) -> Result<()> {
-        let product = &mut ctx.accounts.product;
-        product.underlying = underlying;
-        product.strike_asset = strike_asset;
-        product.collateral = collateral;
-        product.is_put = is_put;
-        product.active = true;
-        emit!(ProductWhitelisted {
-            underlying,
-            strike_asset,
-            collateral,
-            is_put,
-        });
-        Ok(())
-    }
-
     /// Register an oToken as whitelisted. Callable by admin or factory.
     pub fn whitelist_otoken(ctx: Context<WhitelistOToken>, otoken_mint: Pubkey) -> Result<()> {
         let config = &ctx.accounts.config;
@@ -95,37 +45,12 @@ pub mod whitelist {
 // State
 // ============================================================
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq)]
-pub enum AssetType {
-    Underlying,
-    Collateral,
-}
-
 /// PDA seeds: [b"whitelist_config"]
 #[account]
 pub struct WhitelistConfig {
     pub admin: Pubkey,
     pub factory: Pubkey,
     pub bump: u8,
-}
-
-/// PDA seeds: [b"asset", mint]
-#[account]
-pub struct WhitelistedAsset {
-    pub mint: Pubkey,
-    pub symbol: [u8; 8],
-    pub asset_type: AssetType,
-    pub active: bool,
-}
-
-/// PDA seeds: [b"product", underlying, collateral, [is_put as u8]]
-#[account]
-pub struct WhitelistedProduct {
-    pub underlying: Pubkey,
-    pub strike_asset: Pubkey,
-    pub collateral: Pubkey,
-    pub is_put: bool,
-    pub active: bool,
 }
 
 /// PDA seeds: [b"whitelisted_otoken", otoken_mint]
@@ -168,60 +93,6 @@ pub struct AdminAction<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(mint: Pubkey)]
-pub struct WhitelistAsset<'info> {
-    #[account(
-        init,
-        payer = admin,
-        space = 8 + 32 + 8 + 1 + 1,
-        seeds = [b"asset", mint.as_ref()],
-        bump,
-    )]
-    pub asset: Account<'info, WhitelistedAsset>,
-    #[account(
-        seeds = [b"whitelist_config"],
-        bump = config.bump,
-        has_one = admin,
-    )]
-    pub config: Account<'info, WhitelistConfig>,
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-#[instruction(
-    underlying: Pubkey,
-    _strike_asset: Pubkey,
-    collateral: Pubkey,
-    is_put: bool,
-)]
-pub struct WhitelistProduct<'info> {
-    #[account(
-        init,
-        payer = admin,
-        space = 8 + 32 + 32 + 32 + 1 + 1,
-        seeds = [
-            b"product",
-            underlying.as_ref(),
-            collateral.as_ref(),
-            &[is_put as u8],
-        ],
-        bump,
-    )]
-    pub product: Account<'info, WhitelistedProduct>,
-    #[account(
-        seeds = [b"whitelist_config"],
-        bump = config.bump,
-        has_one = admin,
-    )]
-    pub config: Account<'info, WhitelistConfig>,
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
 #[instruction(otoken_mint: Pubkey)]
 pub struct WhitelistOToken<'info> {
     #[account(
@@ -245,24 +116,6 @@ pub struct WhitelistOToken<'info> {
 // ============================================================
 // Events
 // ============================================================
-
-#[event]
-pub struct UnderlyingWhitelisted {
-    pub mint: Pubkey,
-}
-
-#[event]
-pub struct CollateralWhitelisted {
-    pub mint: Pubkey,
-}
-
-#[event]
-pub struct ProductWhitelisted {
-    pub underlying: Pubkey,
-    pub strike_asset: Pubkey,
-    pub collateral: Pubkey,
-    pub is_put: bool,
-}
 
 #[event]
 pub struct OTokenWhitelisted {

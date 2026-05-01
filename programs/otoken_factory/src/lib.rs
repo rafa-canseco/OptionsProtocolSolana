@@ -3,6 +3,8 @@ use anchor_spl::token::{Mint, Token};
 
 declare_id!("84hBdboukYWVg7DoBu5Z22vCgodG4B1PFSMXrBZAivZ1");
 
+const MIN_OTOKEN_LIFETIME_SECS: i64 = 60;
+
 #[program]
 pub mod otoken_factory {
     use super::*;
@@ -43,6 +45,11 @@ pub mod otoken_factory {
         require!(strike_asset != Pubkey::default(), FactoryError::ZeroAddress);
         require!(collateral != Pubkey::default(), FactoryError::ZeroAddress);
         require!(strike_price > 0, FactoryError::InvalidStrikePrice);
+        let clock = Clock::get()?;
+        require!(
+            expiry > clock.unix_timestamp + MIN_OTOKEN_LIFETIME_SECS,
+            FactoryError::InvalidExpiry
+        );
 
         let otoken = &mut ctx.accounts.otoken;
         otoken.underlying = underlying;
@@ -233,4 +240,6 @@ pub enum FactoryError {
     InvalidStrikePrice,
     #[msg("Arithmetic overflow")]
     MathOverflow,
+    #[msg("Expiry must be in the future")]
+    InvalidExpiry,
 }
