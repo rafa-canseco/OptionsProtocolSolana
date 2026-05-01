@@ -203,6 +203,8 @@ const findWhitelistedOTokenPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("whitelisted_otoken"), mint.toBuffer()], pid);
 const findPoolVaultAuthPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("pool_vault_auth"), mint.toBuffer()], pid);
+const findVaultMMPda = (vault: PublicKey, pid: PublicKey) =>
+  findPda([Buffer.from("vault_mm"), vault.toBuffer()], pid);
 const findMockJupAuthPda = (pid: PublicKey) =>
   findPda([Buffer.from("mock_jupiter_auth")], pid);
 const findOracleExpiryPricePda = (underlying: PublicKey, expiry: BN, pid: PublicKey) =>
@@ -266,6 +268,33 @@ function injectMakerBalance(
   });
 }
 
+function injectVaultMM(
+  context: any,
+  pda: PublicKey,
+  bump: number,
+  programId: PublicKey,
+  maker: PublicKey,
+  vault: PublicKey,
+  otokenMint: PublicKey,
+  remainingAmount: bigint
+): void {
+  const data = Buffer.alloc(8 + 32 + 32 + 32 + 8 + 1);
+  const crypto = require("crypto");
+  const disc = crypto.createHash("sha256").update("account:VaultMM").digest();
+  disc.copy(data, 0, 0, 8);
+  maker.toBuffer().copy(data, 8);
+  vault.toBuffer().copy(data, 40);
+  otokenMint.toBuffer().copy(data, 72);
+  data.writeBigUInt64LE(remainingAmount, 104);
+  data.writeUInt8(bump, 112);
+  context.setAccount(pda, {
+    lamports: LAMPORTS_PER_SOL,
+    data,
+    owner: programId,
+    executable: false,
+  });
+}
+
 // ─── Fixture builder ─────────────────────────────────────────
 //
 // Builds a fully-wired PUT or CALL scenario with one oToken series
@@ -300,6 +329,7 @@ interface Scenario {
   poolTokenAccount: PublicKey;
   poolVaultAuthPda: PublicKey;
   vaultPda: PublicKey;
+  vaultMmPda: PublicKey;
 
   settlerOtokenAccount: PublicKey;
   settlerCollateralAccount: PublicKey;
@@ -636,6 +666,20 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     otokenMint,
     BigInt(opts.amountOTokens.toString())
   );
+  const [vaultMmPda, vaultMmBump] = findVaultMMPda(
+    vaultPda,
+    batchSettlerProgram.programId
+  );
+  injectVaultMM(
+    context,
+    vaultMmPda,
+    vaultMmBump,
+    batchSettlerProgram.programId,
+    maker.publicKey,
+    vaultPda,
+    otokenMint,
+    BigInt(opts.amountOTokens.toString())
+  );
 
   // Mock Jupiter reserves
   const mockAuthPda = findMockJupAuthPda(mockJupiterProgram.programId);
@@ -740,6 +784,7 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     poolTokenAccount,
     poolVaultAuthPda,
     vaultPda,
+    vaultMmPda,
     settlerOtokenAccount,
     settlerCollateralAccount,
     settlerContraAccount,
@@ -810,6 +855,7 @@ async function callPhysicalRedeem(s: Scenario, route: { data: Buffer; accounts: 
       settlerConfig: s.settlerConfigPda,
       operator: s.operator.publicKey,
       makerOtokenBalance: s.makerBalancePda,
+      vaultMm: s.vaultMmPda,
       controllerConfig: s.controllerConfigPda,
       otokenInfo: s.otokenInfoPda,
       otokenMint: s.otokenMint,
@@ -928,6 +974,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
             makerOtokenBalance: s.makerBalancePda,
+            vaultMm: s.vaultMmPda,
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
@@ -1182,6 +1229,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
             makerOtokenBalance: s.makerBalancePda,
+            vaultMm: s.vaultMmPda,
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
@@ -1219,6 +1267,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
             makerOtokenBalance: s.makerBalancePda,
+            vaultMm: s.vaultMmPda,
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
@@ -1257,6 +1306,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
             makerOtokenBalance: s.makerBalancePda,
+            vaultMm: s.vaultMmPda,
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
@@ -1302,6 +1352,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             settlerConfig: s.settlerConfigPda,
             operator: s.operator.publicKey,
             makerOtokenBalance: s.makerBalancePda,
+            vaultMm: s.vaultMmPda,
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,

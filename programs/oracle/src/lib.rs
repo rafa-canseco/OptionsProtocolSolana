@@ -18,6 +18,10 @@ pub mod oracle {
         price_deviation_threshold_bps: u16,
     ) -> Result<()> {
         require!(admin != Pubkey::default(), OracleError::ZeroAddress);
+        require!(
+            price_deviation_threshold_bps > 0,
+            OracleError::InvalidDeviationThreshold
+        );
         let config = &mut ctx.accounts.config;
         config.admin = admin;
         config.pending_admin = Pubkey::default();
@@ -96,8 +100,8 @@ pub mod oracle {
     /// Lock expiry price for settlement. The PDA [expiry_price,
     /// underlying, expiry] can only be created once — attempting to
     /// set the same underlying+expiry again fails (Anchor `init`).
-    /// Validates submitted price against Pyth live feed when
-    /// deviation threshold > 0 and feed is active.
+    /// Validates submitted price against Pyth live feed and requires
+    /// an active feed plus a non-zero deviation threshold.
     pub fn set_expiry_price(
         ctx: Context<SetExpiryPrice>,
         underlying: Pubkey,
@@ -116,21 +120,22 @@ pub mod oracle {
         let feed = &ctx.accounts.feed;
 
         require!(feed.active, OracleError::FeedNotActive);
-        // Validate against Pyth if threshold set. A deregistered feed
-        // must not be usable to bypass the deviation guard.
-        if config.price_deviation_threshold_bps > 0 {
-            let pyth = parse_pyth_price_update(
-                &ctx.accounts.pyth_price_update,
-                &config.pyth_receiver_program,
-                &feed.pyth_feed_id,
-            )?;
+        require!(
+            config.price_deviation_threshold_bps > 0,
+            OracleError::InvalidDeviationThreshold
+        );
 
-            validate_staleness(pyth.publish_time, config.max_staleness_secs)?;
+        let pyth = parse_pyth_price_update(
+            &ctx.accounts.pyth_price_update,
+            &config.pyth_receiver_program,
+            &feed.pyth_feed_id,
+        )?;
 
-            let pyth_normalized = normalize_to_8_decimals(pyth.price, pyth.exponent)?;
+        validate_staleness(pyth.publish_time, config.max_staleness_secs)?;
 
-            validate_price_deviation(price, pyth_normalized, config.price_deviation_threshold_bps)?;
-        }
+        let pyth_normalized = normalize_to_8_decimals(pyth.price, pyth.exponent)?;
+
+        validate_price_deviation(price, pyth_normalized, config.price_deviation_threshold_bps)?;
 
         let ep = &mut ctx.accounts.expiry_price;
         ep.underlying = underlying;
@@ -170,6 +175,7 @@ pub mod oracle {
         ctx: Context<AdminAction>,
         threshold_bps: u16,
     ) -> Result<()> {
+        require!(threshold_bps > 0, OracleError::InvalidDeviationThreshold);
         emit!(PriceDeviationThresholdUpdated {
             old: ctx.accounts.config.price_deviation_threshold_bps,
             new: threshold_bps,
@@ -502,6 +508,8 @@ pub enum OracleError {
     ConfidenceTooWide,
     #[msg("Price deviation exceeds threshold")]
     PriceDeviationTooHigh,
+    #[msg("Price deviation threshold must be greater than zero")]
+    InvalidDeviationThreshold,
     #[msg("Expiry timestamp not reached")]
     ExpiryNotReached,
     #[msg("Expiry price not set")]

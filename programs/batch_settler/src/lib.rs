@@ -190,6 +190,7 @@ pub mod batch_settler {
         vault_mm.maker = ctx.accounts.maker.key();
         vault_mm.vault = ctx.accounts.vault.key();
         vault_mm.otoken_mint = ctx.accounts.otoken_mint.key();
+        vault_mm.remaining_amount = amount;
         vault_mm.bump = ctx.bumps.vault_mm;
 
         transfer_premium(&ctx, signer_seeds, net, fee)?;
@@ -516,12 +517,16 @@ pub mod batch_settler {
     pub fn clear_mm_balance_for_vault(ctx: Context<ClearMMBalance>) -> Result<()> {
         require!(ctx.accounts.vault.settled, SettlerError::VaultNotSettled);
 
-        let vault_mm = &ctx.accounts.vault_mm;
+        let vault_mm = &mut ctx.accounts.vault_mm;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
 
-        let to_clear = mm_bal.balance;
+        let to_clear = vault_mm.remaining_amount.min(mm_bal.balance);
         if to_clear > 0 {
-            mm_bal.balance = 0;
+            mm_bal.balance = mm_bal
+                .balance
+                .checked_sub(to_clear)
+                .ok_or(SettlerError::MathOverflow)?;
+            vault_mm.remaining_amount = 0;
             emit!(MMBalanceCleared {
                 maker: vault_mm.maker,
                 otoken_mint: mm_bal.otoken_mint,
@@ -591,6 +596,16 @@ pub mod batch_settler {
             ctx.accounts.maker_otoken_balance.balance >= amount,
             SettlerError::InsufficientMMBalance
         );
+        require!(
+            ctx.accounts.vault_mm.remaining_amount >= amount,
+            SettlerError::InsufficientMMBalance
+        );
+        ctx.accounts.vault_mm.remaining_amount = ctx
+            .accounts
+            .vault_mm
+            .remaining_amount
+            .checked_sub(amount)
+            .ok_or(SettlerError::MathOverflow)?;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
         mm_bal.balance = mm_bal
             .balance
@@ -765,6 +780,7 @@ pub struct VaultMM {
     pub maker: Pubkey,
     pub vault: Pubkey,
     pub otoken_mint: Pubkey,
+    pub remaining_amount: u64,
     pub bump: u8,
 }
 
@@ -1032,7 +1048,7 @@ pub struct ExecuteOrder<'info> {
     #[account(
         init,
         payer = user,
-        space = 8 + 32 + 32 + 32 + 1,
+        space = 8 + 32 + 32 + 32 + 8 + 1,
         seeds = [b"vault_mm", vault.key().as_ref()],
         bump,
     )]
@@ -1305,6 +1321,7 @@ pub struct ClearMMBalance<'info> {
     pub caller: Signer<'info>,
 
     #[account(
+        mut,
         seeds = [b"vault_mm", vault_mm.vault.as_ref()],
         bump = vault_mm.bump,
     )]
@@ -1404,6 +1421,18 @@ pub struct PhysicalRedeem<'info> {
             @ SettlerError::Unauthorized,
     )]
     pub vault: Account<'info, controller::Vault>,
+    #[account(
+        mut,
+        seeds = [b"vault_mm", vault.key().as_ref()],
+        bump = vault_mm.bump,
+        constraint = vault_mm.vault == vault.key()
+            @ SettlerError::Unauthorized,
+        constraint = vault_mm.maker == maker_otoken_balance.maker
+            @ SettlerError::Unauthorized,
+        constraint = vault_mm.otoken_mint == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub vault_mm: Account<'info, VaultMM>,
     /// User's contra-asset destination. For PUT this is the direct
     /// Jupiter swap output; for CALL this is paid from settler_contra
     /// after the swap. Owner must match `user`.
