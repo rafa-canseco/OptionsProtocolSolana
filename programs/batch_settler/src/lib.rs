@@ -647,6 +647,13 @@ pub mod batch_settler {
                 settler_contra_delta == 0,
                 SettlerError::UnexpectedSwapDestination
             );
+            // The route must consume some collateral as input. A
+            // zero-input swap delivering contra to the user is a
+            // signal Jupiter sourced funds elsewhere — refuse it.
+            require!(
+                collateral_used > 0,
+                SettlerError::UnexpectedSwapDestination
+            );
 
             // Surplus collateral (collateral_mint) → MM.
             let surplus_collateral = collateral_received
@@ -1161,13 +1168,18 @@ pub struct RedeemForMM<'info> {
     /// Settler's collateral account (receives redeem payout)
     #[account(
         mut,
+        constraint = settler_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
-    /// MM's collateral account — must be owned by the maker
+    /// MM's collateral account — must be owned by the maker and hold
+    /// the option's collateral mint.
     #[account(
         mut,
+        constraint = mm_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = mm_collateral_account.owner
             == maker_otoken_balance.maker
             @ SettlerError::InvalidCustodyAccount,
@@ -1225,11 +1237,21 @@ pub struct MMSelfRedeem<'info> {
     pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
     #[account(
         mut,
+        constraint = settler_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    /// MM (self-redeem) destination — must be owned by the signing
+    /// maker and hold the option's collateral mint.
+    #[account(
+        mut,
+        constraint = mm_collateral_account.mint == otoken_info.collateral_mint
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = mm_collateral_account.owner == maker.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
     pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
     pub pool_token_account: Box<Account<'info, TokenAccount>>,
@@ -1325,8 +1347,13 @@ pub struct PhysicalRedeem<'info> {
     /// otoken_info.underlying; for CALL it must equal
     /// otoken_info.strike_asset. Validated in the handler.
     pub contra_mint: Account<'info, Mint>,
-    /// Settler's contra-asset token account. Used by the CALL flow
-    /// to receive the Jupiter swap output before paying the user.
+    /// Settler's contra-asset token account.
+    ///
+    /// CALL flow: receives the Jupiter swap output, then pays the
+    /// user contra_amount and routes the surplus to the MM.
+    /// PUT flow: must remain untouched by the swap. The handler
+    /// asserts a zero delta on this account, so a route that
+    /// accidentally deposits contra here reverts.
     #[account(
         mut,
         constraint = settler_contra_account.mint == contra_mint.key()
@@ -1348,13 +1375,21 @@ pub struct PhysicalRedeem<'info> {
     pub user_contra_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: User identity. user_contra_account is bound to this key.
     pub user: AccountInfo<'info>,
-    /// MM receives surplus. Mint must match the surplus asset:
-    /// PUT  → otoken_info.collateral_mint, CALL → contra_mint.
-    /// Validated in the handler since it's conditional on is_put.
+    /// MM receives surplus. Owner must be the maker the option was
+    /// custodied for. Mint must match the surplus asset:
+    ///   PUT  → otoken_info.collateral_mint
+    ///   CALL → contra_mint
+    /// The mint check is conditional on is_put, so it lives in the
+    /// handler. The owner binding is enforced here at deserialization.
+    #[account(
+        mut,
+        constraint = mm_collateral_account.owner
+            == maker_otoken_balance.maker
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
     #[account(mut)]
-    pub mm_collateral_account: Account<'info, TokenAccount>,
-    #[account(mut)]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 

@@ -621,6 +621,82 @@ describe("post-expiry instructions", () => {
         assert.include(err.toString(), "ZeroAmount");
       }
     });
+
+    // NM-004 regression: pre-existing residue / external donations
+    // sitting in settler_collateral_account must NOT be swept to MM.
+    // The handler now snapshots the balance before the redeem CPI
+    // and transfers only the redeem delta.
+    it("transfers only the redeem delta (not pre-existing residue) to MM", async () => {
+      // Donate 7 USDC to settler_collateral_account before invoking.
+      const donation = 7_000_000;
+      const donorAccount = await bankrunCreateTokenAccount(
+        context,
+        admin,
+        collateralMint,
+        admin.publicKey
+      );
+      await bankrunMintTo(context, admin, collateralMint, donorAccount, admin, donation);
+
+      const transferIx = require("@solana/spl-token").createTransferInstruction(
+        donorAccount,
+        settlerCollateralAccount,
+        admin.publicKey,
+        donation
+      );
+      const donationTx = new Transaction().add(transferIx);
+      donationTx.recentBlockhash = context.lastBlockhash;
+      donationTx.feePayer = admin.publicKey;
+      donationTx.sign(admin);
+      await context.banksClient.processTransaction(donationTx);
+
+      const mmBefore = await context.banksClient.getAccount(mmCollateralAccount);
+      const mmAmountBefore = Buffer.from(mmBefore!.data).readBigUInt64LE(64);
+
+      // Redeem the full custodied amount (1 oToken = 100_000_000).
+      // Strike $2000, mark $1500, 6-dec collateral → ITM PUT redeem
+      // returns full collateral = 2_000_000_000 (2000 USDC).
+      await batchSettlerProgram.methods
+        .redeemForMm(new BN(50_000_000)) // 0.5 oToken
+        .accounts({
+          settlerConfig: settlerConfigPda,
+          operator: operator.publicKey,
+          makerOtokenBalance: makerOTokenBalancePda,
+          controllerConfig: controllerConfigPda,
+          otokenInfo: otokenInfoPda,
+          otokenMint: otokenMint,
+          settlerOtokenAccount: settlerOtokenAccount,
+          settlerCollateralAccount: settlerCollateralAccount,
+          mmCollateralAccount: mmCollateralAccount,
+          poolTokenAccount: poolTokenAccount,
+          poolVaultAuthority: poolVaultAuthPda,
+          controllerProgram: controllerProgram.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([operator])
+        .rpc();
+
+      const mmAfter = await context.banksClient.getAccount(mmCollateralAccount);
+      const mmAmountAfter = Buffer.from(mmAfter!.data).readBigUInt64LE(64);
+      const delta = mmAmountAfter - mmAmountBefore;
+
+      // Expected redeem payout for 0.5 oToken at strike $2000 (8 dec)
+      // with 6-dec collateral: 5e7 * 2e11 / 1e10 = 1e9 (1000 USDC).
+      // Donation MUST stay in settler_collateral_account.
+      assert.equal(
+        delta.toString(),
+        "1000000000",
+        "MM received exactly the redeem delta, not delta + donation"
+      );
+
+      // Donation should still be sitting in the settler account.
+      const settlerAfter = await context.banksClient.getAccount(settlerCollateralAccount);
+      const settlerAmount = Buffer.from(settlerAfter!.data).readBigUInt64LE(64);
+      assert.equal(
+        settlerAmount.toString(),
+        donation.toString(),
+        "donation untouched in settler_collateral_account"
+      );
+    });
   });
 
   // ─── mm_self_redeem ────────────────────────────────────

@@ -625,6 +625,36 @@ function buildMockSwapRoute(s: Scenario, inputAmount: bigint, outputAmount: bigi
   return { data, accounts };
 }
 
+// Build a `swap_split` route that delivers to two destinations.
+// Used by the UnexpectedSwapDestination tests to simulate a Jupiter
+// route that "leaks" output into an account the protocol expects to
+// remain untouched.
+function buildMockSplitRoute(
+  s: Scenario,
+  inputAmount: bigint,
+  outputPrimary: bigint,
+  primaryDest: PublicKey,
+  outputSecondary: bigint,
+  secondaryDest: PublicKey
+) {
+  const data = (s.mockJupiterProgram.coder.instruction as any).encode("swapSplit", {
+    inputAmount: new BN(inputAmount.toString()),
+    outputPrimary: new BN(outputPrimary.toString()),
+    outputSecondary: new BN(outputSecondary.toString()),
+  });
+  const accounts = [
+    { pubkey: s.settlerCollateralAccount, isWritable: true, isSigner: false },
+    { pubkey: s.mockInReserve, isWritable: true, isSigner: false },
+    { pubkey: s.mockOutReserve, isWritable: true, isSigner: false },
+    { pubkey: primaryDest, isWritable: true, isSigner: false },
+    { pubkey: secondaryDest, isWritable: true, isSigner: false },
+    { pubkey: s.settlerConfigPda, isWritable: false, isSigner: false },
+    { pubkey: s.mockAuthPda, isWritable: false, isSigner: false },
+    { pubkey: TOKEN_PROGRAM_ID, isWritable: false, isSigner: false },
+  ];
+  return { data, accounts };
+}
+
 async function callPhysicalRedeem(s: Scenario, route: { data: Buffer; accounts: any[] }) {
   return s.batchSettlerProgram.methods
     .physicalRedeem(s.amount, Buffer.from(route.data))
@@ -770,7 +800,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
           .rpc();
         assert.fail("expected InvalidContraMint");
       } catch (err: any) {
-        assert.include(err.toString().toLowerCase(), "contra mint");
+        assert.include(err.toString(), "InvalidContraMint");
       }
     });
 
@@ -855,17 +885,49 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       }
     });
 
-    it("reverts when Jupiter route deposits into settler_contra (PUT path)", async () => {
+    it("reverts with InsufficientSwapOutput when Jupiter delivers nothing to user (PUT)", async () => {
       const s = await buildFixture(PUT_BASELINE);
-      // Misroute: deliver contra to settler_contra_account instead of user.
+      // All contra goes to settler_contra; user gets 0 → user_contra_delta < contra_amount.
       const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.settlerContraAccount);
       try {
         await callPhysicalRedeem(s, route);
-        assert.fail("expected UnexpectedSwapDestination or InsufficientSwapOutput");
+        assert.fail("expected InsufficientSwapOutput");
       } catch (err: any) {
-        // user_contra delta will be 0 → InsufficientSwapOutput,
-        // OR settler_contra delta != 0 → UnexpectedSwapDestination.
-        assert.match(err.toString(), /InsufficientSwapOutput|UnexpectedSwapDestination/);
+        assert.include(err.toString(), "InsufficientSwapOutput");
+      }
+    });
+
+    it("reverts with UnexpectedSwapDestination when route leaks into settler_contra (PUT)", async () => {
+      const s = await buildFixture(PUT_BASELINE);
+      // Pay user the full contra_amount (passes the InsufficientSwapOutput
+      // check) but ALSO leak 1 unit into settler_contra. The
+      // settler_contra_delta != 0 guard must fire.
+      const route = buildMockSplitRoute(
+        s,
+        1_500_000_000n,         // input collateral consumed
+        s.contraAmount,          // primary → user (satisfies user_contra_delta >= contra_amount)
+        s.userContraAccount,
+        1n,                      // secondary → settler_contra (1 unit leak)
+        s.settlerContraAccount,
+      );
+      try {
+        await callPhysicalRedeem(s, route);
+        assert.fail("expected UnexpectedSwapDestination");
+      } catch (err: any) {
+        assert.include(err.toString(), "UnexpectedSwapDestination");
+      }
+    });
+
+    it("reverts with UnexpectedSwapDestination when PUT swap consumes no collateral", async () => {
+      const s = await buildFixture(PUT_BASELINE);
+      // Zero-input route still pays the user — should be rejected
+      // because Jupiter must source from the redeemed collateral.
+      const route = buildMockSwapRoute(s, 0n, s.contraAmount, s.userContraAccount);
+      try {
+        await callPhysicalRedeem(s, route);
+        assert.fail("expected UnexpectedSwapDestination");
+      } catch (err: any) {
+        assert.include(err.toString(), "UnexpectedSwapDestination");
       }
     });
   });
@@ -909,15 +971,252 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
       }
     });
 
-    it("reverts when Jupiter route delivers contra directly to user (CALL path)", async () => {
+    it("reverts with InsufficientSwapOutput when CALL settler_contra delta is below contra_amount", async () => {
       const s = await buildFixture(CALL_BASELINE);
-      // Misroute: deposit contra into user_contra_account directly.
-      const route = buildMockSwapRoute(s, 100_000_000n, 2_500_000_000n, s.userContraAccount);
+      // Underdeliver to settler_contra; settler_contra_delta < contra_amount
+      // fires before any other guard.
+      const tooLittle = s.contraAmount - 1n;
+      const route = buildMockSwapRoute(s, 100_000_000n, tooLittle, s.settlerContraAccount);
       try {
         await callPhysicalRedeem(s, route);
-        assert.fail("expected UnexpectedSwapDestination or InsufficientSwapOutput");
+        assert.fail("expected InsufficientSwapOutput");
       } catch (err: any) {
-        assert.match(err.toString(), /UnexpectedSwapDestination|InsufficientSwapOutput/);
+        assert.include(err.toString(), "InsufficientSwapOutput");
+      }
+    });
+
+    it("reverts with UnexpectedSwapDestination when CALL route leaks contra to user", async () => {
+      const s = await buildFixture(CALL_BASELINE);
+      // Settler_contra gets enough, user_contra also receives a leak.
+      // Handler order in CALL: collateral_used == collateral_received,
+      // settler_contra_delta >= contra_amount, then user_contra_delta == 0
+      // → the leak trips UnexpectedSwapDestination.
+      const route = buildMockSplitRoute(
+        s,
+        100_000_000n,            // all collateral consumed
+        2_500_000_000n,          // primary → settler_contra
+        s.settlerContraAccount,
+        1n,                      // secondary → user (1 unit leak)
+        s.userContraAccount,
+      );
+      try {
+        await callPhysicalRedeem(s, route);
+        assert.fail("expected UnexpectedSwapDestination");
+      } catch (err: any) {
+        assert.include(err.toString(), "UnexpectedSwapDestination");
+      }
+    });
+
+    it("reverts with UnexpectedSwapDestination when CALL swap leaves residual collateral", async () => {
+      const s = await buildFixture(CALL_BASELINE);
+      // Consume only half the collateral. The CALL guard requires the
+      // route to consume ALL redeemed collateral.
+      const route = buildMockSwapRoute(s, 50_000_000n, 2_500_000_000n, s.settlerContraAccount);
+      try {
+        await callPhysicalRedeem(s, route);
+        assert.fail("expected UnexpectedSwapDestination");
+      } catch (err: any) {
+        assert.include(err.toString(), "UnexpectedSwapDestination");
+      }
+    });
+  });
+
+  describe("input validation", () => {
+    it("rejects amount == 0", async () => {
+      const s = await buildFixture(PUT_BASELINE);
+      const route = buildMockSwapRoute(s, 1n, 1n, s.userContraAccount);
+      try {
+        await s.batchSettlerProgram.methods
+          .physicalRedeem(new BN(0), Buffer.from(route.data))
+          .accounts({
+            settlerConfig: s.settlerConfigPda,
+            operator: s.operator.publicKey,
+            makerOtokenBalance: s.makerBalancePda,
+            controllerConfig: s.controllerConfigPda,
+            otokenInfo: s.otokenInfoPda,
+            otokenMint: s.otokenMint,
+            settlerOtokenAccount: s.settlerOtokenAccount,
+            settlerCollateralAccount: s.settlerCollateralAccount,
+            contraMint: s.contraMint,
+            settlerContraAccount: s.settlerContraAccount,
+            userContraAccount: s.userContraAccount,
+            user: s.user.publicKey,
+            mmCollateralAccount: s.mmDestinationAccount,
+            poolTokenAccount: s.poolTokenAccount,
+            poolVaultAuthority: s.poolVaultAuthPda,
+            jupiterProgram: s.mockJupiterProgram.programId,
+            controllerProgram: s.controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(route.accounts)
+          .signers([s.operator])
+          .rpc();
+        assert.fail("expected ZeroAmount");
+      } catch (err: any) {
+        assert.include(err.toString(), "ZeroAmount");
+      }
+    });
+
+    it("rejects amount > MM custody balance", async () => {
+      const s = await buildFixture(PUT_BASELINE);
+      const tooMuch = new BN(s.amount.toNumber() + 1);
+      const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
+      try {
+        await s.batchSettlerProgram.methods
+          .physicalRedeem(tooMuch, Buffer.from(route.data))
+          .accounts({
+            settlerConfig: s.settlerConfigPda,
+            operator: s.operator.publicKey,
+            makerOtokenBalance: s.makerBalancePda,
+            controllerConfig: s.controllerConfigPda,
+            otokenInfo: s.otokenInfoPda,
+            otokenMint: s.otokenMint,
+            settlerOtokenAccount: s.settlerOtokenAccount,
+            settlerCollateralAccount: s.settlerCollateralAccount,
+            contraMint: s.contraMint,
+            settlerContraAccount: s.settlerContraAccount,
+            userContraAccount: s.userContraAccount,
+            user: s.user.publicKey,
+            mmCollateralAccount: s.mmDestinationAccount,
+            poolTokenAccount: s.poolTokenAccount,
+            poolVaultAuthority: s.poolVaultAuthPda,
+            jupiterProgram: s.mockJupiterProgram.programId,
+            controllerProgram: s.controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(route.accounts)
+          .signers([s.operator])
+          .rpc();
+        assert.fail("expected InsufficientMMBalance");
+      } catch (err: any) {
+        assert.include(err.toString(), "InsufficientMMBalance");
+      }
+    });
+
+    it("rejects when jupiter_program does not match settler_config.jupiter_program", async () => {
+      const s = await buildFixture(PUT_BASELINE);
+      const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
+      // Pass the controller program ID as jupiterProgram — clearly wrong
+      // and not equal to settler_config.jupiter_program.
+      try {
+        await s.batchSettlerProgram.methods
+          .physicalRedeem(s.amount, Buffer.from(route.data))
+          .accounts({
+            settlerConfig: s.settlerConfigPda,
+            operator: s.operator.publicKey,
+            makerOtokenBalance: s.makerBalancePda,
+            controllerConfig: s.controllerConfigPda,
+            otokenInfo: s.otokenInfoPda,
+            otokenMint: s.otokenMint,
+            settlerOtokenAccount: s.settlerOtokenAccount,
+            settlerCollateralAccount: s.settlerCollateralAccount,
+            contraMint: s.contraMint,
+            settlerContraAccount: s.settlerContraAccount,
+            userContraAccount: s.userContraAccount,
+            user: s.user.publicKey,
+            mmCollateralAccount: s.mmDestinationAccount,
+            poolTokenAccount: s.poolTokenAccount,
+            poolVaultAuthority: s.poolVaultAuthPda,
+            jupiterProgram: s.controllerProgram.programId,
+            controllerProgram: s.controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(route.accounts)
+          .signers([s.operator])
+          .rpc();
+        assert.fail("expected InvalidJupiterProgram");
+      } catch (err: any) {
+        assert.include(err.toString(), "InvalidJupiterProgram");
+      }
+    });
+
+    it("rejects PUT when mm_collateral_account holds the wrong mint (contra instead of collateral)", async () => {
+      const s = await buildFixture(PUT_BASELINE);
+      // Build a same-owner account that holds contra_mint instead of
+      // collateral_mint — the conditional handler-side mint check
+      // for PUT must reject this.
+      const wrongMmAccount = await bankrunCreateTokenAccount(
+        s.context,
+        s.admin,
+        s.contraMint,        // wrong mint
+        s.maker.publicKey,   // correct owner
+      );
+      const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
+      try {
+        await s.batchSettlerProgram.methods
+          .physicalRedeem(s.amount, Buffer.from(route.data))
+          .accounts({
+            settlerConfig: s.settlerConfigPda,
+            operator: s.operator.publicKey,
+            makerOtokenBalance: s.makerBalancePda,
+            controllerConfig: s.controllerConfigPda,
+            otokenInfo: s.otokenInfoPda,
+            otokenMint: s.otokenMint,
+            settlerOtokenAccount: s.settlerOtokenAccount,
+            settlerCollateralAccount: s.settlerCollateralAccount,
+            contraMint: s.contraMint,
+            settlerContraAccount: s.settlerContraAccount,
+            userContraAccount: s.userContraAccount,
+            user: s.user.publicKey,
+            mmCollateralAccount: wrongMmAccount,
+            poolTokenAccount: s.poolTokenAccount,
+            poolVaultAuthority: s.poolVaultAuthPda,
+            jupiterProgram: s.mockJupiterProgram.programId,
+            controllerProgram: s.controllerProgram.programId,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(route.accounts)
+          .signers([s.operator])
+          .rpc();
+        assert.fail("expected InvalidCustodyAccount");
+      } catch (err: any) {
+        assert.include(err.toString(), "InvalidCustodyAccount");
+      }
+    });
+  });
+
+  describe("compute_contra_amount boundaries", () => {
+    it("PUT accepts inclusive upper bound (underlyingDecimals = 18)", async () => {
+      // 1 oToken (1e8 in 8 dec) → 1e18 contra units (overflow guard:
+      // u64 max ~1.8e19, so 1e18 fits).
+      const s = await buildFixture({ ...PUT_BASELINE, underlyingDecimals: 18 });
+      // Pre-fund out_reserve with at least 1e18; the fixture default
+      // funds 10^(ud + 6) = 10^24 which exceeds u64. Substitute a
+      // smaller amount and verify the contra math still works.
+      // (The fixture's outReserveFund already used pow10; for ud=18
+      // it computed 1e24 — outside u64. Resize the test by reducing
+      // amountOTokens to 1 unit to keep contra within u64.)
+      // Here we simply check that compute_contra_amount accepts the
+      // boundary without UnsupportedDecimals firing.
+      const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
+      try {
+        await callPhysicalRedeem(s, route);
+        // We don't care about success — we care that the failure
+        // (if any) is NOT UnsupportedDecimals.
+      } catch (err: any) {
+        assert.notInclude(err.toString(), "UnsupportedDecimals");
+      }
+    });
+
+    it("PUT rejects underlyingDecimals = 7 (below inclusive lower bound)", async () => {
+      const s = await buildFixture({ ...PUT_BASELINE, underlyingDecimals: 7 });
+      const route = buildMockSwapRoute(s, 1_500_000_000n, s.contraAmount, s.userContraAccount);
+      try {
+        await callPhysicalRedeem(s, route);
+        assert.fail("expected UnsupportedDecimals");
+      } catch (err: any) {
+        assert.include(err.toString(), "UnsupportedDecimals");
+      }
+    });
+
+    it("CALL rejects strikeAssetDecimals = 17 (above inclusive upper bound)", async () => {
+      const s = await buildFixture({ ...CALL_BASELINE, strikeAssetDecimals: 17 });
+      const route = buildMockSwapRoute(s, 100_000_000n, 1n, s.settlerContraAccount);
+      try {
+        await callPhysicalRedeem(s, route);
+        assert.fail("expected UnsupportedDecimals");
+      } catch (err: any) {
+        assert.include(err.toString(), "UnsupportedDecimals");
       }
     });
   });

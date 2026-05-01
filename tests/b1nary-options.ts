@@ -746,6 +746,39 @@ describe("b1nary-options", () => {
         );
       }
     });
+
+    // NM-001 regression: transfer_to_user must reject any caller
+    // that isn't the configured admin. Without this guard the
+    // function would let anyone drain the lending pool via the
+    // PDA-signed SPL transfer.
+    it("rejects transfer_to_user from non-admin signer", async () => {
+      const rando = Keypair.generate();
+      const sig = await connection.requestAirdrop(
+        rando.publicKey,
+        anchor.web3.LAMPORTS_PER_SOL
+      );
+      await connection.confirmTransaction(sig);
+      try {
+        await marginPoolProgram.methods
+          .transferToUser(new BN(1))
+          .accounts({
+            config: configPda,
+            admin: rando.publicKey,
+            poolVault: poolVaultPda,
+            vaultTokenAccount: vaultTokenAccount,
+            userTokenAccount: userTokenAccount,
+            vaultAuthority: vaultAuthPda,
+            recipient: rando.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([rando])
+          .rpc();
+        assert.fail("should reject non-admin caller");
+      } catch (err: any) {
+        // Anchor's has_one violation surfaces as ConstraintHasOne.
+        assert.include(err.toString(), "ConstraintHasOne");
+      }
+    });
   });
 
   // ───────────────────────────────────────────
