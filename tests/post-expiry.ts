@@ -110,6 +110,50 @@ function findWhitelistConfigPda(programId: PublicKey): PublicKey {
   return findPda([Buffer.from("whitelist_config")], programId);
 }
 
+function findFactoryConfigPda(programId: PublicKey): PublicKey {
+  return findPda([Buffer.from("factory_config")], programId);
+}
+
+function findFactoryOTokenPda(
+  underlying: PublicKey,
+  strikeAsset: PublicKey,
+  collateral: PublicKey,
+  strikePrice: BN,
+  expiry: BN,
+  isPut: boolean,
+  programId: PublicKey
+): PublicKey {
+  return findPda([
+    Buffer.from("otoken"),
+    underlying.toBuffer(),
+    strikeAsset.toBuffer(),
+    collateral.toBuffer(),
+    strikePrice.toArrayLike(Buffer, "le", 8),
+    expiry.toArrayLike(Buffer, "le", 8),
+    Buffer.from([isPut ? 1 : 0]),
+  ], programId);
+}
+
+function findFactoryOTokenMintPda(
+  underlying: PublicKey,
+  strikeAsset: PublicKey,
+  collateral: PublicKey,
+  strikePrice: BN,
+  expiry: BN,
+  isPut: boolean,
+  programId: PublicKey
+): PublicKey {
+  return findPda([
+    Buffer.from("otoken_mint"),
+    underlying.toBuffer(),
+    strikeAsset.toBuffer(),
+    collateral.toBuffer(),
+    strikePrice.toArrayLike(Buffer, "le", 8),
+    expiry.toArrayLike(Buffer, "le", 8),
+    Buffer.from([isPut ? 1 : 0]),
+  ], programId);
+}
+
 function findOTokenInfoPda(mint: PublicKey, programId: PublicKey): PublicKey {
   return findPda([Buffer.from("otoken_info"), mint.toBuffer()], programId);
 }
@@ -155,6 +199,7 @@ describe("post-expiry instructions", () => {
   let controllerProgram: any;
   let batchSettlerProgram: any;
   let whitelistProgram: any;
+  let otokenFactoryProgram: any;
 
   const admin = Keypair.generate();
   const operator = Keypair.generate();
@@ -202,21 +247,82 @@ describe("post-expiry instructions", () => {
       require("../target/idl/whitelist.json"),
       provider as unknown as anchor.AnchorProvider
     );
+    otokenFactoryProgram = new Program(
+      require("../target/idl/otoken_factory.json"),
+      provider as unknown as anchor.AnchorProvider
+    );
 
     controllerConfigPda = findControllerConfigPda(controllerProgram.programId);
     settlerConfigPda = findSettlerConfigPda(batchSettlerProgram.programId);
     const whitelistConfigPda = findWhitelistConfigPda(whitelistProgram.programId);
+    const factoryConfigPda = findFactoryConfigPda(otokenFactoryProgram.programId);
 
     // 1. Create collateral mint (6 decimals)
     collateralMint = await bankrunCreateMint(context, admin, admin.publicKey, 6);
 
-    // 2. oToken mint (8 decimals, controller as authority)
-    otokenMint = await bankrunCreateMint(context, admin, controllerConfigPda, 8);
-
-    // 3. Initialize whitelist + whitelist oToken
+    // 2. Initialize whitelist/factory/controller
     await whitelistProgram.methods
       .initialize(admin.publicKey)
       .accounts({ payer: admin.publicKey })
+      .signers([admin])
+      .rpc();
+    await otokenFactoryProgram.methods
+      .initialize(admin.publicKey)
+      .accounts({ payer: admin.publicKey })
+      .signers([admin])
+      .rpc();
+    await controllerProgram.methods
+      .initialize(admin.publicKey)
+      .accounts({ payer: admin.publicKey })
+      .signers([admin])
+      .rpc();
+    await otokenFactoryProgram.methods
+      .setController(controllerConfigPda)
+      .accounts({ admin: admin.publicKey })
+      .signers([admin])
+      .rpc();
+
+    // 3. Create canonical oToken + OTokenInfo with near-future expiry
+    const clock = await context.banksClient.getClock();
+    const expiryTimestamp = new BN(Number(clock.unixTimestamp) + 100);
+    const underlying = Keypair.generate().publicKey;
+    const strikeAsset = Keypair.generate().publicKey;
+    const factoryOtokenPda = findFactoryOTokenPda(
+      underlying,
+      strikeAsset,
+      collateralMint,
+      STRIKE_PRICE,
+      expiryTimestamp,
+      true,
+      otokenFactoryProgram.programId
+    );
+    otokenMint = findFactoryOTokenMintPda(
+      underlying,
+      strikeAsset,
+      collateralMint,
+      STRIKE_PRICE,
+      expiryTimestamp,
+      true,
+      otokenFactoryProgram.programId
+    );
+    await otokenFactoryProgram.methods
+      .createOtoken(
+        underlying,
+        strikeAsset,
+        collateralMint,
+        STRIKE_PRICE,
+        expiryTimestamp,
+        true
+      )
+      .accounts({
+        factoryConfig: factoryConfigPda,
+        otoken: factoryOtokenPda,
+        otokenMint,
+        controllerAuthority: controllerConfigPda,
+        admin: admin.publicKey,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
       .signers([admin])
       .rpc();
 
@@ -232,35 +338,18 @@ describe("post-expiry instructions", () => {
       .signers([admin])
       .rpc();
 
-    // 4. Initialize controller
-    await controllerProgram.methods
-      .initialize(admin.publicKey)
-      .accounts({ payer: admin.publicKey })
-      .signers([admin])
-      .rpc();
-
-    // 5. Create OTokenInfo with near-future expiry
-    const clock = await context.banksClient.getClock();
-    const expiryTimestamp = new BN(Number(clock.unixTimestamp) + 100);
-
     otokenInfoPda = findOTokenInfoPda(otokenMint, controllerProgram.programId);
     await controllerProgram.methods
-      .createOtokenInfo(
-        otokenMint,
-        Keypair.generate().publicKey, // underlying
-        Keypair.generate().publicKey, // strike_asset
-        collateralMint,
-        STRIKE_PRICE,
-        expiryTimestamp,
-        true, // isPut
-        6     // collateral_decimals
-      )
+      .createOtokenInfo()
       .accounts({
         config: controllerConfigPda,
         otokenInfo: otokenInfoPda,
         otokenMint: otokenMint,
+        factoryOtoken: factoryOtokenPda,
+        collateralMintAccount: collateralMint,
         whitelistedOtoken: wlOtokenPda,
         whitelistProgram: whitelistProgram.programId,
+        factoryProgram: otokenFactoryProgram.programId,
         admin: admin.publicKey,
         systemProgram: SystemProgram.programId,
       })

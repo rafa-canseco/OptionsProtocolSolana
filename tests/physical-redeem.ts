@@ -203,8 +203,14 @@ const findWhitelistedOTokenPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("whitelisted_otoken"), mint.toBuffer()], pid);
 const findPoolVaultAuthPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("pool_vault_auth"), mint.toBuffer()], pid);
-const findVaultMMPda = (vault: PublicKey, pid: PublicKey) =>
-  findPda([Buffer.from("vault_mm"), vault.toBuffer()], pid);
+const findVaultMMPda = (
+  vault: PublicKey,
+  pid: PublicKey
+): [PublicKey, number] =>
+  PublicKey.findProgramAddressSync(
+    [Buffer.from("vault_mm"), vault.toBuffer()],
+    pid
+  );
 const findMockJupAuthPda = (pid: PublicKey) =>
   findPda([Buffer.from("mock_jupiter_auth")], pid);
 const findOracleExpiryPricePda = (underlying: PublicKey, expiry: BN, pid: PublicKey) =>

@@ -6,6 +6,7 @@ import {
   SystemProgram,
   LAMPORTS_PER_SOL,
   Ed25519Program,
+  AddressLookupTableProgram,
   Transaction,
   TransactionMessage,
   VersionedTransaction,
@@ -580,6 +581,9 @@ describe("b1nary-options", () => {
     const [whitelistConfigPda] = findWhitelistConfigPda(
       whitelistProgram.programId
     );
+    const [factoryConfigPda] = findFactoryConfigPda(
+      otokenFactoryProgram.programId
+    );
 
     let collateralMint: PublicKey;
     let otokenMint: PublicKey;
@@ -606,6 +610,92 @@ describe("b1nary-options", () => {
         })
         .rpc();
       return wlPda;
+    }
+
+    async function createCanonicalOtokenInfo(params: {
+      underlying: PublicKey;
+      strikeAsset: PublicKey;
+      collateral: PublicKey;
+      strikePrice: BN;
+      expiry: BN;
+      isPut: boolean;
+    }) {
+      const [factoryOtokenPda] = findOTokenPda(
+        params.underlying,
+        params.strikeAsset,
+        params.collateral,
+        params.strikePrice,
+        params.expiry,
+        params.isPut,
+        otokenFactoryProgram.programId
+      );
+      const [factoryOtokenMintPda] = findOTokenMintPda(
+        params.underlying,
+        params.strikeAsset,
+        params.collateral,
+        params.strikePrice,
+        params.expiry,
+        params.isPut,
+        otokenFactoryProgram.programId
+      );
+
+      await otokenFactoryProgram.methods
+        .createOtoken(
+          params.underlying,
+          params.strikeAsset,
+          params.collateral,
+          params.strikePrice,
+          params.expiry,
+          params.isPut
+        )
+        .accounts({
+          factoryConfig: factoryConfigPda,
+          otoken: factoryOtokenPda,
+          otokenMint: factoryOtokenMintPda,
+          controllerAuthority: configPda,
+          admin: admin.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const wlPda = await whitelistOToken(factoryOtokenMintPda);
+      const [infoPda] = findOTokenInfoPda(
+        factoryOtokenMintPda,
+        controllerProgram.programId
+      );
+
+      await controllerProgram.methods
+        .createOtokenInfo()
+        .accounts({
+          config: configPda,
+          otokenInfo: infoPda,
+          otokenMint: factoryOtokenMintPda,
+          factoryOtoken: factoryOtokenPda,
+          collateralMintAccount: params.collateral,
+          whitelistedOtoken: wlPda,
+          whitelistProgram: whitelistProgram.programId,
+          factoryProgram: otokenFactoryProgram.programId,
+          admin: admin.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      return {
+        otokenMint: factoryOtokenMintPda,
+        otokenInfo: infoPda,
+        whitelistedOtoken: wlPda,
+      };
+    }
+
+    function openVaultAccounts(vault: PublicKey) {
+      return {
+        config: configPda,
+        vault,
+        vaultCounter: vaultCounterPda,
+        owner: admin.publicKey,
+        systemProgram: SystemProgram.programId,
+      };
     }
 
     it("initializes whitelist", async () => {
@@ -641,6 +731,19 @@ describe("b1nary-options", () => {
         false,
         "not fully paused"
       );
+
+      await otokenFactoryProgram.methods
+        .initialize(admin.publicKey)
+        .accounts({
+          payer: admin.publicKey,
+        })
+        .rpc();
+      await otokenFactoryProgram.methods
+        .setController(configPda)
+        .accounts({
+          admin: admin.publicKey,
+        })
+        .rpc();
     });
 
     it("initializes vault counter", async () => {
@@ -652,7 +755,9 @@ describe("b1nary-options", () => {
       await controllerProgram.methods
         .initializeCounter()
         .accounts({
+          vaultCounter: vaultCounterPda,
           owner: admin.publicKey,
+          systemProgram: SystemProgram.programId,
         })
         .rpc();
 
@@ -688,9 +793,7 @@ describe("b1nary-options", () => {
 
       await controllerProgram.methods
         .openVault(collateralMint, admin.publicKey)
-        .accounts({
-          owner: admin.publicKey,
-        })
+        .accounts(openVaultAccounts(vaultPda))
         .rpc();
 
       const vault =
@@ -822,16 +925,19 @@ describe("b1nary-options", () => {
     });
 
     it("mints oTokens with collateral check (future expiry)", async () => {
-      // oToken with far future expiry so mint_otoken passes expiry check
-      const otokenMintKp = Keypair.generate();
-      otokenMint = await createMint(
-        connection,
-        admin.payer,
-        configPda,
-        null,
-        8,
-        otokenMintKp
-      );
+      const underlying = Keypair.generate().publicKey;
+      const strikeAsset = Keypair.generate().publicKey;
+      const created = await createCanonicalOtokenInfo({
+          underlying,
+          strikeAsset,
+          collateral: collateralMint,
+          strikePrice: new BN("200000000000"),
+          expiry: FAR_FUTURE_EXPIRY,
+          isPut: true,
+      });
+      otokenMint = created.otokenMint;
+      otokenInfoPda = created.otokenInfo;
+      const wlPda = created.whitelistedOtoken;
 
       ownerOtokenAccount = await createAccount(
         connection,
@@ -840,40 +946,6 @@ describe("b1nary-options", () => {
         admin.publicKey,
         Keypair.generate()
       );
-
-      const underlying = Keypair.generate().publicKey;
-      const strikeAsset = Keypair.generate().publicKey;
-
-      [otokenInfoPda] = findOTokenInfoPda(
-        otokenMint,
-        controllerProgram.programId
-      );
-
-      // Whitelist the oToken before creating info
-      const wlPda = await whitelistOToken(otokenMint);
-
-      // Put option, strike=$2000, far future expiry, 6 decimals
-      await controllerProgram.methods
-        .createOtokenInfo(
-          otokenMint,
-          underlying,
-          strikeAsset,
-          collateralMint,
-          new BN("200000000000"),
-          FAR_FUTURE_EXPIRY,
-          true,
-          6
-        )
-        .accounts({
-          config: configPda,
-          otokenInfo: otokenInfoPda,
-          otokenMint: otokenMint,
-          whitelistedOtoken: wlPda,
-          whitelistProgram: whitelistProgram.programId,
-          admin: admin.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
 
       // Mint 1 oToken (1e8 units). Required collateral for a put:
       // (100_000_000 * 200_000_000_000) / 10^10 = 2_000_000_000
@@ -918,73 +990,51 @@ describe("b1nary-options", () => {
       );
     });
 
-    it("rejects minting expired oTokens", async () => {
-      // Create a separate oToken with expiry=0 (already expired)
-      const expiredMintKp = Keypair.generate();
-      const expiredMint = await createMint(
-        connection,
-        admin.payer,
-        configPda,
-        null,
-        8,
-        expiredMintKp
+    it("rejects expired oToken creation at factory", async () => {
+      const expiredUnderlying = Keypair.generate().publicKey;
+      const expiredStrike = Keypair.generate().publicKey;
+      const [expiredOtokenPda] = findOTokenPda(
+        expiredUnderlying,
+        expiredStrike,
+        collateralMint,
+        new BN("200000000000"),
+        new BN(0),
+        true,
+        otokenFactoryProgram.programId
       );
-      const [expiredInfoPda] = findOTokenInfoPda(
-        expiredMint,
-        controllerProgram.programId
-      );
-
-      const expiredWlPda = await whitelistOToken(expiredMint);
-
-      await controllerProgram.methods
-        .createOtokenInfo(
-          expiredMint,
-          Keypair.generate().publicKey,
-          Keypair.generate().publicKey,
-          collateralMint,
-          new BN("200000000000"),
-          new BN(0), // already expired
-          true,
-          6
-        )
-        .accounts({
-          config: configPda,
-          otokenInfo: expiredInfoPda,
-          otokenMint: expiredMint,
-          whitelistedOtoken: expiredWlPda,
-          whitelistProgram: whitelistProgram.programId,
-          admin: admin.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-
-      const expiredDest = await createAccount(
-        connection,
-        admin.payer,
-        expiredMint,
-        admin.publicKey,
-        Keypair.generate()
+      const [expiredMintPda] = findOTokenMintPda(
+        expiredUnderlying,
+        expiredStrike,
+        collateralMint,
+        new BN("200000000000"),
+        new BN(0),
+        true,
+        otokenFactoryProgram.programId
       );
 
       try {
-        await controllerProgram.methods
-          .mintOtoken(new BN(100_000_000))
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            expiredUnderlying,
+            expiredStrike,
+            collateralMint,
+            new BN("200000000000"),
+            new BN(0),
+            true
+          )
           .accounts({
-            config: configPda,
-            vault: vaultPda,
-            otokenInfo: expiredInfoPda,
-            otokenMint: expiredMint,
-            destination: expiredDest,
-            owner: admin.publicKey,
+            factoryConfig: factoryConfigPda,
+            otoken: expiredOtokenPda,
+            otokenMint: expiredMintPda,
+            controllerAuthority: configPda,
+            admin: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
           })
           .rpc();
-        assert.fail("should reject minting expired oToken");
+        assert.fail("should reject expired oToken creation");
       } catch (err: any) {
-        assert.include(
-          err.toString(),
-          "Option has expired"
-        );
+        assert.include(err.toString(), "InvalidExpiry");
       }
     });
 
@@ -1060,9 +1110,7 @@ describe("b1nary-options", () => {
 
       await controllerProgram.methods
         .openVault(collateralMint, admin.publicKey)
-        .accounts({
-          owner: admin.publicKey,
-        })
+        .accounts(openVaultAccounts(vaultPda2))
         .rpc();
 
       const vault2 =
@@ -1136,12 +1184,15 @@ describe("b1nary-options", () => {
     });
 
     it("rejects open_vault when partially paused", async () => {
+      const [nextVaultPda] = findVaultPda(
+        admin.publicKey,
+        new BN(2),
+        controllerProgram.programId
+      );
       try {
         await controllerProgram.methods
           .openVault(collateralMint, admin.publicKey)
-          .accounts({
-            owner: admin.publicKey,
-          })
+          .accounts(openVaultAccounts(nextVaultPda))
           .rpc();
         assert.fail(
           "should reject vault creation when paused"
@@ -1216,12 +1267,15 @@ describe("b1nary-options", () => {
     });
 
     it("rejects open_vault when fully paused", async () => {
+      const [nextVaultPda] = findVaultPda(
+        admin.publicKey,
+        new BN(2),
+        controllerProgram.programId
+      );
       try {
         await controllerProgram.methods
           .openVault(collateralMint, admin.publicKey)
-          .accounts({
-            owner: admin.publicKey,
-          })
+          .accounts(openVaultAccounts(nextVaultPda))
           .rpc();
         assert.fail("should reject when fully paused");
       } catch (err: any) {
@@ -1271,9 +1325,7 @@ describe("b1nary-options", () => {
 
       await controllerProgram.methods
         .openVault(collateralMint, admin.publicKey)
-        .accounts({
-          owner: admin.publicKey,
-        })
+        .accounts(openVaultAccounts(vaultPda3))
         .rpc();
 
       const vault3 =
@@ -1349,17 +1401,10 @@ describe("b1nary-options", () => {
     const strikeAsset = Keypair.generate().publicKey;
     const collateral = Keypair.generate().publicKey;
     const strikePrice = new BN("200000000000");
-    const expiry = new BN(1735689600);
+    const expiry = FAR_FUTURE_EXPIRY;
     const isPut = true;
 
     it("initializes factory with admin", async () => {
-      await otokenFactoryProgram.methods
-        .initialize(admin.publicKey)
-        .accounts({
-          payer: admin.publicKey,
-        })
-        .rpc();
-
       const config =
         await otokenFactoryProgram.account.factoryConfig.fetch(
           factoryConfigPda
@@ -1368,26 +1413,19 @@ describe("b1nary-options", () => {
         config.admin.equals(admin.publicKey),
         "admin matches"
       );
-      assert.ok(
-        config.controller.equals(ZERO_PUBKEY),
-        "controller starts zero"
-      );
-      assert.equal(
-        config.otokenCount.toNumber(),
-        0,
-        "otoken count starts at 0"
-      );
+      assert.ok(config.controller.equals(controllerConfigPda));
     });
 
-    it("rejects create_otoken before controller is set", async () => {
+    it("rejects create_otoken with expired expiry", async () => {
+      const expiredExpiry = new BN(0);
       const [otokenPda] = findOTokenPda(
         underlying, strikeAsset, collateral,
-        strikePrice, expiry, isPut,
+        strikePrice, expiredExpiry, isPut,
         otokenFactoryProgram.programId
       );
       const [otokenMintPda] = findOTokenMintPda(
         underlying, strikeAsset, collateral,
-        strikePrice, expiry, isPut,
+        strikePrice, expiredExpiry, isPut,
         otokenFactoryProgram.programId
       );
 
@@ -1395,7 +1433,7 @@ describe("b1nary-options", () => {
         await otokenFactoryProgram.methods
           .createOtoken(
             underlying, strikeAsset, collateral,
-            strikePrice, expiry, isPut
+            strikePrice, expiredExpiry, isPut
           )
           .accounts({
             factoryConfig: factoryConfigPda,
@@ -1407,12 +1445,9 @@ describe("b1nary-options", () => {
             systemProgram: SystemProgram.programId,
           })
           .rpc();
-        assert.fail("should reject without controller");
+        assert.fail("should reject expired expiry");
       } catch (err: any) {
-        assert.include(
-          err.toString(),
-          "Controller not set"
-        );
+        assert.include(err.toString(), "InvalidExpiry");
       }
     });
 
@@ -1470,6 +1505,10 @@ describe("b1nary-options", () => {
         strikePrice, expiry, isPut,
         otokenFactoryProgram.programId
       );
+      const beforeConfig =
+        await otokenFactoryProgram.account.factoryConfig.fetch(
+          factoryConfigPda
+        );
 
       await otokenFactoryProgram.methods
         .createOtoken(
@@ -1498,7 +1537,7 @@ describe("b1nary-options", () => {
         otoken.strikePrice.toString(),
         "200000000000"
       );
-      assert.equal(otoken.expiry.toNumber(), 1735689600);
+      assert.equal(otoken.expiry.toString(), expiry.toString());
       assert.equal(otoken.isPut, true);
       assert.ok(otoken.mint.equals(otokenMintPda));
 
@@ -1514,7 +1553,10 @@ describe("b1nary-options", () => {
         await otokenFactoryProgram.account.factoryConfig.fetch(
           factoryConfigPda
         );
-      assert.equal(config.otokenCount.toNumber(), 1);
+      assert.equal(
+        config.otokenCount.toNumber(),
+        beforeConfig.otokenCount.toNumber() + 1
+      );
     });
 
     it("prevents duplicate oToken creation", async () => {
@@ -1568,6 +1610,10 @@ describe("b1nary-options", () => {
         strikePrice2, expiry, false,
         otokenFactoryProgram.programId
       );
+      const beforeConfig =
+        await otokenFactoryProgram.account.factoryConfig.fetch(
+          factoryConfigPda
+        );
 
       await otokenFactoryProgram.methods
         .createOtoken(
@@ -1597,7 +1643,10 @@ describe("b1nary-options", () => {
         await otokenFactoryProgram.account.factoryConfig.fetch(
           factoryConfigPda
         );
-      assert.equal(config.otokenCount.toNumber(), 2);
+      assert.equal(
+        config.otokenCount.toNumber(),
+        beforeConfig.otokenCount.toNumber() + 1
+      );
     });
 
     it("rejects create_otoken from non-admin", async () => {
@@ -1879,7 +1928,7 @@ describe("b1nary-options", () => {
       const [quoteFillPda] = findQuoteFillPda(
         maker.publicKey,
         quoteId,
-        new BN(0),
+        new BN(1),
         batchSettlerProgram.programId
       );
       const fill =
@@ -2024,6 +2073,7 @@ describe("b1nary-options", () => {
       let vaultCounterForSettler: PublicKey;
       let vaultPda: PublicKey;
       let makerOTokenBalancePda: PublicKey;
+      let executeOrderLookupTable: anchor.web3.AddressLookupTableAccount;
 
       const [controllerConfigPda] = findControllerConfigPda(
         controllerProgram.programId
@@ -2061,6 +2111,18 @@ describe("b1nary-options", () => {
         return msg;
       }
 
+      function compileExecuteOrderMessage(
+        payer: PublicKey,
+        blockhash: string,
+        instructions: anchor.web3.TransactionInstruction[]
+      ) {
+        return new TransactionMessage({
+          payerKey: payer,
+          recentBlockhash: blockhash,
+          instructions,
+        }).compileToV0Message([executeOrderLookupTable]);
+      }
+
       before(async () => {
         // Collateral mint (6 decimals)
         collateralMint = await createMint(
@@ -2074,14 +2136,45 @@ describe("b1nary-options", () => {
           admin.publicKey, null, 6
         );
 
-        // oToken mint: controller config PDA as mint authority
-        const otokenMintKp = Keypair.generate();
-        otokenMint = await createMint(
-          connection, admin.payer,
-          controllerConfigPda, null, 8, otokenMintKp
+        const [factoryOtokenPda] = findOTokenPda(
+          underlying,
+          strikeAsset,
+          collateralMint,
+          strikePrice,
+          FAR_FUTURE_EXPIRY,
+          true,
+          otokenFactoryProgram.programId
         );
+        const [factoryOtokenMintPda] = findOTokenMintPda(
+          underlying,
+          strikeAsset,
+          collateralMint,
+          strikePrice,
+          FAR_FUTURE_EXPIRY,
+          true,
+          otokenFactoryProgram.programId
+        );
+        await otokenFactoryProgram.methods
+          .createOtoken(
+            underlying,
+            strikeAsset,
+            collateralMint,
+            strikePrice,
+            FAR_FUTURE_EXPIRY,
+            true
+          )
+          .accounts({
+            factoryConfig: findFactoryConfigPda(otokenFactoryProgram.programId)[0],
+            otoken: factoryOtokenPda,
+            otokenMint: factoryOtokenMintPda,
+            controllerAuthority: controllerConfigPda,
+            admin: admin.publicKey,
+            tokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+          })
+          .rpc();
 
-        // OTokenInfo: put, strike=$2000, far future expiry
+        otokenMint = factoryOtokenMintPda;
         [otokenInfoPda] = findOTokenInfoPda(
           otokenMint, controllerProgram.programId
         );
@@ -2104,17 +2197,16 @@ describe("b1nary-options", () => {
           .rpc();
 
         await controllerProgram.methods
-          .createOtokenInfo(
-            otokenMint, underlying, strikeAsset,
-            collateralMint, strikePrice,
-            FAR_FUTURE_EXPIRY, true, 6
-          )
+          .createOtokenInfo()
           .accounts({
             config: controllerConfigPda,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            factoryOtoken: factoryOtokenPda,
+            collateralMintAccount: collateralMint,
             whitelistedOtoken: wlOtokenPda,
             whitelistProgram: whitelistProgram.programId,
+            factoryProgram: otokenFactoryProgram.programId,
             admin: admin.publicKey,
             systemProgram: SystemProgram.programId,
           })
@@ -2205,6 +2297,71 @@ describe("b1nary-options", () => {
           maker.publicKey, otokenMint,
           batchSettlerProgram.programId
         );
+
+        const [makerStatePda] = findMakerStatePda(
+          maker.publicKey,
+          batchSettlerProgram.programId
+        );
+        const [nextVaultPda] = findVaultPda(
+          settlerConfigPda,
+          new BN(1),
+          controllerProgram.programId
+        );
+        const commonLookupAddresses = [
+          batchSettlerProgram.programId,
+          controllerProgram.programId,
+          TOKEN_PROGRAM_ID,
+          SystemProgram.programId,
+          SYSVAR_INSTRUCTIONS_PUBKEY,
+          settlerConfigPda,
+          makerStatePda,
+          controllerConfigPda,
+          vaultPda,
+          nextVaultPda,
+          vaultCounterForSettler,
+          otokenInfoPda,
+          otokenMint,
+          userCollateralAccount,
+          poolTokenAccount,
+          poolVaultAuthPda,
+          settlerOtokenAccount,
+          mmPremiumAccount,
+          userPremiumAccount,
+          treasuryPremiumAccount,
+          makerOTokenBalancePda,
+          findVaultMMPda(vaultPda, batchSettlerProgram.programId)[0],
+          findVaultMMPda(nextVaultPda, batchSettlerProgram.programId)[0],
+          maker.publicKey,
+        ];
+        const recentSlot = Math.max(
+          (await connection.getSlot("confirmed")) - 1,
+          0
+        );
+        const [createLookupIx, lookupTableAddress] =
+          AddressLookupTableProgram.createLookupTable({
+            authority: admin.publicKey,
+            payer: admin.publicKey,
+            recentSlot,
+          });
+        const extendLookupIx = AddressLookupTableProgram.extendLookupTable({
+          authority: admin.publicKey,
+          payer: admin.publicKey,
+          lookupTable: lookupTableAddress,
+          addresses: commonLookupAddresses,
+        });
+        await provider.sendAndConfirm(
+          new Transaction().add(createLookupIx, extendLookupIx)
+        );
+        const warmupSlot = await connection.getSlot("confirmed");
+        while ((await connection.getSlot("confirmed")) <= warmupSlot) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+        const lookupTable =
+          await connection.getAddressLookupTable(lookupTableAddress);
+        if (!lookupTable.value) {
+          throw new Error("execute_order lookup table not found");
+        }
+        executeOrderLookupTable = lookupTable.value;
       });
 
       it("executes order: user sells option, MM buys", async () => {
@@ -2267,11 +2424,11 @@ describe("b1nary-options", () => {
 
         const { blockhash, lastValidBlockHeight } =
           await connection.getLatestBlockhash();
-        const messageV0 = new TransactionMessage({
-          payerKey: user.publicKey,
-          recentBlockhash: blockhash,
-          instructions: [ed25519Ix, executeOrderIx],
-        }).compileToV0Message();
+        const messageV0 = compileExecuteOrderMessage(
+          user.publicKey,
+          blockhash,
+          [ed25519Ix, executeOrderIx]
+        );
         const vtx = new VersionedTransaction(messageV0);
         vtx.sign([user]);
 
@@ -2582,11 +2739,11 @@ describe("b1nary-options", () => {
           .instruction();
 
         const { blockhash } = await connection.getLatestBlockhash();
-        const msgV0 = new TransactionMessage({
-          payerKey: attacker.publicKey,
-          recentBlockhash: blockhash,
-          instructions: [ed25519Ix, ix],
-        }).compileToV0Message();
+        const msgV0 = compileExecuteOrderMessage(
+          attacker.publicKey,
+          blockhash,
+          [ed25519Ix, ix]
+        );
         const vtx = new VersionedTransaction(msgV0);
         vtx.sign([attacker]);
 
@@ -2732,11 +2889,11 @@ describe("b1nary-options", () => {
           .instruction();
 
         const { blockhash } = await connection.getLatestBlockhash();
-        const msgV0 = new TransactionMessage({
-          payerKey: user.publicKey,
-          recentBlockhash: blockhash,
-          instructions: [ed25519Ix, ix],
-        }).compileToV0Message();
+        const msgV0 = compileExecuteOrderMessage(
+          user.publicKey,
+          blockhash,
+          [ed25519Ix, ix]
+        );
         const vtx = new VersionedTransaction(msgV0);
         vtx.sign([user]);
 
@@ -2834,11 +2991,11 @@ describe("b1nary-options", () => {
 
         const { blockhash } =
           await connection.getLatestBlockhash();
-        const msgV0 = new TransactionMessage({
-          payerKey: user.publicKey,
-          recentBlockhash: blockhash,
-          instructions: [ed25519Ix, executeOrderIx],
-        }).compileToV0Message();
+        const msgV0 = compileExecuteOrderMessage(
+          user.publicKey,
+          blockhash,
+          [ed25519Ix, executeOrderIx]
+        );
         const vtx = new VersionedTransaction(msgV0);
         vtx.sign([user]);
 
