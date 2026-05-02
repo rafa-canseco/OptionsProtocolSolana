@@ -516,6 +516,10 @@ pub mod batch_settler {
     /// Uses VaultMM PDA to find the associated MM.
     pub fn clear_mm_balance_for_vault(ctx: Context<ClearMMBalance>) -> Result<()> {
         require!(ctx.accounts.vault.settled, SettlerError::VaultNotSettled);
+        require!(
+            ctx.accounts.settler_otoken_account.amount == 0,
+            SettlerError::CustodyOtokensOutstanding
+        );
 
         let vault_mm = &mut ctx.accounts.vault_mm;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
@@ -793,7 +797,7 @@ pub struct MakerState {
     pub bump: u8,
 }
 
-/// PDA seeds: [b"quote_fill", maker.as_ref(), quote_id.to_le_bytes()]
+/// PDA seeds: [b"quote_fill", maker.as_ref(), maker_nonce.to_le_bytes(), quote_id.to_le_bytes()]
 #[account]
 pub struct QuoteFill {
     pub filled_amount: u64,
@@ -940,6 +944,7 @@ pub struct ExecuteOrder<'info> {
         seeds = [
             b"quote_fill",
             maker.key().as_ref(),
+            &maker_nonce.to_le_bytes(),
             &quote_id.to_le_bytes(),
         ],
         bump,
@@ -1346,6 +1351,18 @@ pub struct ClearMMBalance<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+    #[account(
+        constraint = otoken_mint.key() == vault_mm.otoken_mint
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub otoken_mint: Account<'info, Mint>,
+    #[account(
+        constraint = settler_otoken_account.mint == vault_mm.otoken_mint
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = settler_otoken_account.owner == settler_config.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
 }
 
 #[derive(Accounts)]
@@ -1613,6 +1630,8 @@ pub enum SettlerError {
     EscapeNotReady,
     #[msg("Insufficient MM oToken balance")]
     InsufficientMMBalance,
+    #[msg("Settler still custodies oTokens for this series")]
+    CustodyOtokensOutstanding,
     #[msg("Option has not expired")]
     OptionNotExpired,
     #[msg("Expiry price not set")]
@@ -1702,49 +1721,57 @@ fn verify_ed25519_signature(
     pubkey: &[u8; 32],
     message: &[u8],
 ) -> Result<()> {
-    let ix = ixs_sysvar::load_instruction_at_checked(0, ix_sysvar)
+    let current_index = ixs_sysvar::load_current_index_checked(ix_sysvar)
         .map_err(|_| error!(SettlerError::InvalidEd25519Instruction))?;
-    require!(
-        ix.program_id == ed25519_program::ID,
-        SettlerError::InvalidEd25519Instruction
-    );
-    require!(ix.data.len() >= 16, SettlerError::InvalidEd25519Data);
-    require!(ix.data[0] == 1, SettlerError::InvalidEd25519Data);
+
+    let mut saw_ed25519 = false;
+    for i in 0..current_index {
+        let ix = ixs_sysvar::load_instruction_at_checked(i as usize, ix_sysvar)
+            .map_err(|_| error!(SettlerError::InvalidEd25519Instruction))?;
+        if ix.program_id != ed25519_program::ID {
+            continue;
+        }
+        saw_ed25519 = true;
+        if ed25519_instruction_matches(&ix.data, pubkey, message).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+
+    if saw_ed25519 {
+        Err(error!(SettlerError::InvalidSignature))
+    } else {
+        Err(error!(SettlerError::InvalidEd25519Instruction))
+    }
+}
+
+fn ed25519_instruction_matches(data: &[u8], pubkey: &[u8; 32], message: &[u8]) -> Result<bool> {
+    require!(data.len() >= 16, SettlerError::InvalidEd25519Data);
+    require!(data[0] == 1, SettlerError::InvalidEd25519Data);
 
     let pk_off = u16::from_le_bytes(
-        ix.data[6..8]
+        data[6..8]
             .try_into()
             .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
     ) as usize;
     let msg_off = u16::from_le_bytes(
-        ix.data[10..12]
+        data[10..12]
             .try_into()
             .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
     ) as usize;
     let msg_sz = u16::from_le_bytes(
-        ix.data[12..14]
+        data[12..14]
             .try_into()
             .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
     ) as usize;
 
+    require!(pk_off + 32 <= data.len(), SettlerError::InvalidEd25519Data);
     require!(
-        pk_off + 32 <= ix.data.len(),
+        msg_off + msg_sz <= data.len(),
         SettlerError::InvalidEd25519Data
     );
-    require!(
-        msg_off + msg_sz <= ix.data.len(),
-        SettlerError::InvalidEd25519Data
-    );
-    require!(
-        &ix.data[pk_off..pk_off + 32] == pubkey,
-        SettlerError::InvalidSignature
-    );
-    require!(msg_sz == message.len(), SettlerError::InvalidSignature);
-    require!(
-        &ix.data[msg_off..msg_off + msg_sz] == message,
-        SettlerError::InvalidSignature
-    );
-    Ok(())
+    Ok(&data[pk_off..pk_off + 32] == pubkey
+        && msg_sz == message.len()
+        && &data[msg_off..msg_off + msg_sz] == message)
 }
 
 fn fund_vault_rent(ctx: &Context<ExecuteOrder>) -> Result<()> {
