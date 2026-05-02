@@ -581,34 +581,6 @@ pub mod batch_settler {
         Ok(())
     }
 
-    /// Clear MM's custodied balance after emergency withdrawal.
-    /// Uses VaultMM PDA to find the associated MM.
-    pub fn clear_mm_balance_for_vault(ctx: Context<ClearMMBalance>) -> Result<()> {
-        require!(ctx.accounts.vault.settled, SettlerError::VaultNotSettled);
-        require!(
-            ctx.accounts.settler_otoken_account.amount == 0,
-            SettlerError::CustodyOtokensOutstanding
-        );
-
-        let vault_mm = &mut ctx.accounts.vault_mm;
-        let mm_bal = &mut ctx.accounts.maker_otoken_balance;
-
-        let to_clear = vault_mm.remaining_amount.min(mm_bal.balance);
-        if to_clear > 0 {
-            mm_bal.balance = mm_bal
-                .balance
-                .checked_sub(to_clear)
-                .ok_or(SettlerError::MathOverflow)?;
-            vault_mm.remaining_amount = 0;
-            emit!(MMBalanceCleared {
-                maker: vault_mm.maker,
-                otoken_mint: mm_bal.otoken_mint,
-                amount: to_clear,
-            });
-        }
-        Ok(())
-    }
-
     /// Physical delivery for ITM options.
     ///
     /// No flash loan: redeem oTokens first, then Jupiter swaps
@@ -1333,58 +1305,6 @@ pub struct MMSelfRedeem<'info> {
 }
 
 #[derive(Accounts)]
-pub struct ClearMMBalance<'info> {
-    #[account(
-        seeds = [b"settler_config"],
-        bump = settler_config.bump,
-        constraint = caller.key() == settler_config.owner
-            || caller.key() == settler_config.operator
-            @ SettlerError::Unauthorized,
-    )]
-    pub settler_config: Account<'info, SettlerConfig>,
-    pub caller: Signer<'info>,
-
-    #[account(
-        mut,
-        seeds = [b"vault_mm", vault_mm.vault.as_ref()],
-        bump = vault_mm.bump,
-    )]
-    pub vault_mm: Account<'info, VaultMM>,
-
-    /// Vault must be settled before clearing MM balance
-    #[account(
-        constraint = vault.key() == vault_mm.vault
-            @ SettlerError::Unauthorized,
-    )]
-    pub vault: Account<'info, controller::Vault>,
-
-    #[account(
-        mut,
-        seeds = [
-            b"mm_balance",
-            vault_mm.maker.as_ref(),
-            vault_mm.otoken_mint.as_ref(),
-        ],
-        bump = maker_otoken_balance.bump,
-        constraint = maker_otoken_balance.otoken_mint == vault.otoken_mint
-            @ SettlerError::InvalidCustodyAccount,
-    )]
-    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
-    #[account(
-        constraint = otoken_mint.key() == vault_mm.otoken_mint
-            @ SettlerError::InvalidCustodyAccount,
-    )]
-    pub otoken_mint: Account<'info, Mint>,
-    #[account(
-        constraint = settler_otoken_account.mint == vault_mm.otoken_mint
-            @ SettlerError::InvalidCustodyAccount,
-        constraint = settler_otoken_account.owner == settler_config.key()
-            @ SettlerError::InvalidCustodyAccount,
-    )]
-    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
-}
-
-#[derive(Accounts)]
 pub struct PhysicalRedeem<'info> {
     #[account(
         seeds = [b"settler_config"],
@@ -1587,13 +1507,6 @@ pub struct MMSelfRedeemEvent {
 }
 
 #[event]
-pub struct MMBalanceCleared {
-    pub maker: Pubkey,
-    pub otoken_mint: Pubkey,
-    pub amount: u64,
-}
-
-#[event]
 pub struct PhysicalDeliveryEvent {
     pub user: Pubkey,
     pub maker: Pubkey,
@@ -1649,8 +1562,6 @@ pub enum SettlerError {
     EscapeNotReady,
     #[msg("Insufficient MM oToken balance")]
     InsufficientMMBalance,
-    #[msg("Settler still custodies oTokens for this series")]
-    CustodyOtokensOutstanding,
     #[msg("Option has not expired")]
     OptionNotExpired,
     #[msg("Expiry price not set")]
