@@ -137,6 +137,75 @@ pub mod batch_settler {
         require!(amount > 0, SettlerError::ZeroAmount);
         require!(bid_price > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
+        require_keys_eq!(
+            ctx.accounts.maker_state.maker,
+            ctx.accounts.maker.key(),
+            SettlerError::Unauthorized
+        );
+        require_keys_eq!(
+            ctx.accounts.user_collateral_account.owner,
+            ctx.accounts.user.key(),
+            SettlerError::Unauthorized
+        );
+        require_keys_eq!(
+            ctx.accounts.pool_token_account.mint,
+            collateral_mint,
+            SettlerError::InvalidCustodyAccount
+        );
+        let (expected_pool_authority, _) = Pubkey::find_program_address(
+            &[b"pool_vault_auth", collateral_mint.as_ref()],
+            &ctx.accounts.controller_program.key(),
+        );
+        require_keys_eq!(
+            ctx.accounts.pool_vault_authority.key(),
+            expected_pool_authority,
+            SettlerError::Unauthorized
+        );
+        require_keys_eq!(
+            ctx.accounts.pool_token_account.owner,
+            expected_pool_authority,
+            SettlerError::Unauthorized
+        );
+        require_keys_eq!(
+            ctx.accounts.settler_otoken_account.mint,
+            ctx.accounts.otoken_mint.key(),
+            SettlerError::InvalidCustodyAccount
+        );
+        require_keys_eq!(
+            ctx.accounts.settler_otoken_account.owner,
+            ctx.accounts.settler_config.key(),
+            SettlerError::InvalidCustodyAccount
+        );
+        require_keys_eq!(
+            ctx.accounts.mm_premium_account.owner,
+            ctx.accounts.maker.key(),
+            SettlerError::InvalidCustodyAccount
+        );
+        require_keys_eq!(
+            ctx.accounts.mm_premium_account.mint,
+            premium_mint,
+            SettlerError::InvalidCustodyAccount
+        );
+        require_keys_eq!(
+            ctx.accounts.user_premium_account.owner,
+            ctx.accounts.user.key(),
+            SettlerError::Unauthorized
+        );
+        require_keys_eq!(
+            ctx.accounts.user_premium_account.mint,
+            premium_mint,
+            SettlerError::InvalidCustodyAccount
+        );
+        require_keys_eq!(
+            ctx.accounts.treasury_account.owner,
+            ctx.accounts.settler_config.treasury,
+            SettlerError::InvalidTreasury
+        );
+        require_keys_eq!(
+            ctx.accounts.treasury_account.mint,
+            premium_mint,
+            SettlerError::InvalidTreasury
+        );
 
         validate_maker(&ctx.accounts.maker_state, maker_nonce)?;
         let message = build_quote_message(
@@ -516,6 +585,10 @@ pub mod batch_settler {
     /// Uses VaultMM PDA to find the associated MM.
     pub fn clear_mm_balance_for_vault(ctx: Context<ClearMMBalance>) -> Result<()> {
         require!(ctx.accounts.vault.settled, SettlerError::VaultNotSettled);
+        require!(
+            ctx.accounts.settler_otoken_account.amount == 0,
+            SettlerError::CustodyOtokensOutstanding
+        );
 
         let vault_mm = &mut ctx.accounts.vault_mm;
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
@@ -793,7 +866,7 @@ pub struct MakerState {
     pub bump: u8,
 }
 
-/// PDA seeds: [b"quote_fill", maker.as_ref(), quote_id.to_le_bytes()]
+/// PDA seeds: [b"quote_fill", maker.as_ref(), maker_nonce.to_le_bytes(), quote_id.to_le_bytes()]
 #[account]
 pub struct QuoteFill {
     pub filled_amount: u64,
@@ -824,7 +897,7 @@ pub struct Initialize<'info> {
         seeds = [b"settler_config"],
         bump,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -838,7 +911,7 @@ pub struct InitVaultCounter<'info> {
         bump = settler_config.bump,
         has_one = owner,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
     #[account(mut)]
     pub owner: Signer<'info>,
     /// CHECK: Created by controller CPI (vault_counter PDA)
@@ -864,7 +937,7 @@ pub struct WhitelistMaker<'info> {
         seeds = [b"maker", maker.as_ref()],
         bump,
     )]
-    pub maker_state: Account<'info, MakerState>,
+    pub maker_state: Box<Account<'info, MakerState>>,
     #[account(mut)]
     pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -878,7 +951,7 @@ pub struct IncrementNonce<'info> {
         bump = maker_state.bump,
         has_one = maker,
     )]
-    pub maker_state: Account<'info, MakerState>,
+    pub maker_state: Box<Account<'info, MakerState>>,
     pub maker: Signer<'info>,
 }
 
@@ -897,7 +970,7 @@ pub struct CancelQuote<'info> {
         ],
         bump,
     )]
-    pub quote_fill: Account<'info, QuoteFill>,
+    pub quote_fill: Box<Account<'info, QuoteFill>>,
     #[account(
         seeds = [b"maker", maker.key().as_ref()],
         bump = maker_state.bump,
@@ -940,11 +1013,12 @@ pub struct ExecuteOrder<'info> {
         seeds = [
             b"quote_fill",
             maker.key().as_ref(),
+            &maker_nonce.to_le_bytes(),
             &quote_id.to_le_bytes(),
         ],
         bump,
     )]
-    pub quote_fill: Account<'info, QuoteFill>,
+    pub quote_fill: Box<Account<'info, QuoteFill>>,
 
     /// CHECK: Validated by controller program
     pub controller_config: AccountInfo<'info>,
@@ -960,74 +1034,24 @@ pub struct ExecuteOrder<'info> {
     pub otoken_mint: Box<Account<'info, Mint>>,
 
     /// User's collateral token account (delegated to settler PDA).
-    /// Owner must match the signing user — prevents an attacker from
-    /// using a victim's pre-delegated account as the source of collateral.
-    #[account(
-        mut,
-        constraint = user_collateral_account.owner == user.key()
-            @ SettlerError::Unauthorized,
-    )]
+    #[account(mut)]
     pub user_collateral_account: Box<Account<'info, TokenAccount>>,
     /// Controller pool receiving collateral
-    #[account(
-        mut,
-        constraint = pool_token_account.mint == collateral_mint
-            @ SettlerError::InvalidCustodyAccount,
-        constraint = pool_token_account.owner
-            == pool_vault_authority.key()
-            @ SettlerError::Unauthorized,
-    )]
+    #[account(mut)]
     pub pool_token_account: Box<Account<'info, TokenAccount>>,
     /// CHECK: Controller pool vault authority PDA.
-    #[account(
-        seeds = [
-            b"pool_vault_auth",
-            collateral_mint.as_ref(),
-        ],
-        bump,
-        seeds::program = controller_program.key(),
-    )]
     pub pool_vault_authority: AccountInfo<'info>,
     /// Settler's oToken account (custody for MM, owned by settler PDA)
-    #[account(
-        mut,
-        constraint = settler_otoken_account.mint
-            == otoken_mint.key()
-            @ SettlerError::InvalidCustodyAccount,
-        constraint = settler_otoken_account.owner
-            == settler_config.key()
-            @ SettlerError::InvalidCustodyAccount,
-    )]
+    #[account(mut)]
     pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
     /// MM's premium account (delegated to settler PDA, source of premium).
-    /// Owner must be the signed-quote maker — prevents using one MM's
-    /// delegation to fund another MM's quote.
-    #[account(
-        mut,
-        constraint = mm_premium_account.owner == maker.key()
-            @ SettlerError::InvalidCustodyAccount,
-        constraint = mm_premium_account.mint == premium_mint
-            @ SettlerError::InvalidCustodyAccount,
-    )]
+    #[account(mut)]
     pub mm_premium_account: Box<Account<'info, TokenAccount>>,
     /// User receives net premium here. Must belong to the signing user.
-    #[account(
-        mut,
-        constraint = user_premium_account.owner == user.key()
-            @ SettlerError::Unauthorized,
-        constraint = user_premium_account.mint == premium_mint
-            @ SettlerError::InvalidCustodyAccount,
-    )]
+    #[account(mut)]
     pub user_premium_account: Box<Account<'info, TokenAccount>>,
     /// Treasury receives protocol fee here
-    #[account(
-        mut,
-        constraint = treasury_account.owner
-            == settler_config.treasury
-            @ SettlerError::InvalidTreasury,
-        constraint = treasury_account.mint == premium_mint
-            @ SettlerError::InvalidTreasury,
-    )]
+    #[account(mut)]
     pub treasury_account: Box<Account<'info, TokenAccount>>,
 
     /// MM oToken balance tracking
@@ -1042,7 +1066,7 @@ pub struct ExecuteOrder<'info> {
         ],
         bump,
     )]
-    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+    pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
 
     /// Vault-to-MM mapping for emergency ledger cleanup
     #[account(
@@ -1052,7 +1076,7 @@ pub struct ExecuteOrder<'info> {
         seeds = [b"vault_mm", vault.key().as_ref()],
         bump,
     )]
-    pub vault_mm: Account<'info, VaultMM>,
+    pub vault_mm: Box<Account<'info, VaultMM>>,
 
     /// User (option seller) provides collateral and receives premium
     #[account(mut)]
@@ -1075,7 +1099,7 @@ pub struct SettleVaultForMaker<'info> {
         constraint = operator.key() == settler_config.operator
             @ SettlerError::Unauthorized,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
     pub operator: Signer<'info>,
 
     /// CHECK: Validated by controller CPI
@@ -1157,7 +1181,7 @@ pub struct EmergencyWithdrawOrder<'info> {
         ],
         bump = maker_otoken_balance.bump,
     )]
-    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+    pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
 
     pub controller_program: Program<'info, ControllerProgram>,
     pub token_program: Program<'info, Token>,
@@ -1199,9 +1223,9 @@ pub struct RedeemForMM<'info> {
 
     /// CHECK: Validated by controller CPI
     pub controller_config: AccountInfo<'info>,
-    pub otoken_info: Account<'info, controller::OTokenInfo>,
+    pub otoken_info: Box<Account<'info, controller::OTokenInfo>>,
     #[account(mut)]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: Box<Account<'info, Mint>>,
     /// Settler's oToken custody (source of oTokens to burn)
     #[account(
         mut,
@@ -1346,6 +1370,18 @@ pub struct ClearMMBalance<'info> {
             @ SettlerError::InvalidCustodyAccount,
     )]
     pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+    #[account(
+        constraint = otoken_mint.key() == vault_mm.otoken_mint
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub otoken_mint: Account<'info, Mint>,
+    #[account(
+        constraint = settler_otoken_account.mint == vault_mm.otoken_mint
+            @ SettlerError::InvalidCustodyAccount,
+        constraint = settler_otoken_account.owner == settler_config.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
 }
 
 #[derive(Accounts)]
@@ -1395,7 +1431,7 @@ pub struct PhysicalRedeem<'info> {
     /// The contra-asset mint. For PUT this must equal
     /// otoken_info.underlying; for CALL it must equal
     /// otoken_info.strike_asset. Validated in the handler.
-    pub contra_mint: Account<'info, Mint>,
+    pub contra_mint: Box<Account<'info, Mint>>,
     /// Settler's contra-asset token account.
     ///
     /// CALL flow: receives the Jupiter swap output, then pays the
@@ -1420,7 +1456,7 @@ pub struct PhysicalRedeem<'info> {
         constraint = vault.beneficiary == user.key()
             @ SettlerError::Unauthorized,
     )]
-    pub vault: Account<'info, controller::Vault>,
+    pub vault: Box<Account<'info, controller::Vault>>,
     #[account(
         mut,
         seeds = [b"vault_mm", vault.key().as_ref()],
@@ -1432,7 +1468,7 @@ pub struct PhysicalRedeem<'info> {
         constraint = vault_mm.otoken_mint == otoken_mint.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub vault_mm: Account<'info, VaultMM>,
+    pub vault_mm: Box<Account<'info, VaultMM>>,
     /// User's contra-asset destination. For PUT this is the direct
     /// Jupiter swap output; for CALL this is paid from settler_contra
     /// after the swap. Owner must match `user`.
@@ -1613,6 +1649,8 @@ pub enum SettlerError {
     EscapeNotReady,
     #[msg("Insufficient MM oToken balance")]
     InsufficientMMBalance,
+    #[msg("Settler still custodies oTokens for this series")]
+    CustodyOtokensOutstanding,
     #[msg("Option has not expired")]
     OptionNotExpired,
     #[msg("Expiry price not set")]
@@ -1702,49 +1740,57 @@ fn verify_ed25519_signature(
     pubkey: &[u8; 32],
     message: &[u8],
 ) -> Result<()> {
-    let ix = ixs_sysvar::load_instruction_at_checked(0, ix_sysvar)
+    let current_index = ixs_sysvar::load_current_index_checked(ix_sysvar)
         .map_err(|_| error!(SettlerError::InvalidEd25519Instruction))?;
-    require!(
-        ix.program_id == ed25519_program::ID,
-        SettlerError::InvalidEd25519Instruction
-    );
-    require!(ix.data.len() >= 16, SettlerError::InvalidEd25519Data);
-    require!(ix.data[0] == 1, SettlerError::InvalidEd25519Data);
+
+    let mut saw_ed25519 = false;
+    for i in 0..current_index {
+        let ix = ixs_sysvar::load_instruction_at_checked(i as usize, ix_sysvar)
+            .map_err(|_| error!(SettlerError::InvalidEd25519Instruction))?;
+        if ix.program_id != ed25519_program::ID {
+            continue;
+        }
+        saw_ed25519 = true;
+        if ed25519_instruction_matches(&ix.data, pubkey, message).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+
+    if saw_ed25519 {
+        Err(error!(SettlerError::InvalidSignature))
+    } else {
+        Err(error!(SettlerError::InvalidEd25519Instruction))
+    }
+}
+
+fn ed25519_instruction_matches(data: &[u8], pubkey: &[u8; 32], message: &[u8]) -> Result<bool> {
+    require!(data.len() >= 16, SettlerError::InvalidEd25519Data);
+    require!(data[0] == 1, SettlerError::InvalidEd25519Data);
 
     let pk_off = u16::from_le_bytes(
-        ix.data[6..8]
+        data[6..8]
             .try_into()
             .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
     ) as usize;
     let msg_off = u16::from_le_bytes(
-        ix.data[10..12]
+        data[10..12]
             .try_into()
             .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
     ) as usize;
     let msg_sz = u16::from_le_bytes(
-        ix.data[12..14]
+        data[12..14]
             .try_into()
             .map_err(|_| error!(SettlerError::InvalidEd25519Data))?,
     ) as usize;
 
+    require!(pk_off + 32 <= data.len(), SettlerError::InvalidEd25519Data);
     require!(
-        pk_off + 32 <= ix.data.len(),
+        msg_off + msg_sz <= data.len(),
         SettlerError::InvalidEd25519Data
     );
-    require!(
-        msg_off + msg_sz <= ix.data.len(),
-        SettlerError::InvalidEd25519Data
-    );
-    require!(
-        &ix.data[pk_off..pk_off + 32] == pubkey,
-        SettlerError::InvalidSignature
-    );
-    require!(msg_sz == message.len(), SettlerError::InvalidSignature);
-    require!(
-        &ix.data[msg_off..msg_off + msg_sz] == message,
-        SettlerError::InvalidSignature
-    );
-    Ok(())
+    Ok(&data[pk_off..pk_off + 32] == pubkey
+        && msg_sz == message.len()
+        && &data[msg_off..msg_off + msg_sz] == message)
 }
 
 fn fund_vault_rent(ctx: &Context<ExecuteOrder>) -> Result<()> {
