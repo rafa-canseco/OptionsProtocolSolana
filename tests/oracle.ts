@@ -465,6 +465,81 @@ describe("oracle", () => {
     }
   });
 
+  it("rejects set_expiry_price with wide confidence interval", async () => {
+    const mockPythKp = Keypair.generate();
+    const clock = await context.banksClient.getClock();
+    const pastExpiry = new BN((clock.unixTimestamp - 300n).toString());
+
+    const pythData = buildMockPythAccount({
+      feedId: feedId2,
+      price: 10000_00000000n,
+      conf: 500_00000000n, // 5% of price > 2% max_confidence_bps
+      exponent: -8,
+      publishTime: clock.unixTimestamp,
+    });
+
+    context.setAccount(mockPythKp.publicKey, {
+      lamports: 1_000_000_000,
+      data: pythData,
+      owner: fakePythProgramId,
+      executable: false,
+    });
+
+    try {
+      await oracleProgram.methods
+        .setExpiryPrice(
+          underlying2,
+          pastExpiry,
+          new BN("1000000000000")
+        )
+        .accounts({
+          config: configPda,
+          feed: feedPda2,
+          pythPriceUpdate: mockPythKp.publicKey,
+          caller: operator.publicKey,
+        })
+        .signers([operator])
+        .rpc();
+      assert.fail("should reject wide confidence on expiry price");
+    } catch (err: any) {
+      assert.include(err.toString(), "ConfidenceTooWide");
+    }
+  });
+
+  it("rejects normalization that would round to zero", async () => {
+    const mockPythKp = Keypair.generate();
+    const clock = await context.banksClient.getClock();
+
+    const pythData = buildMockPythAccount({
+      feedId: feedId2,
+      price: 1n,
+      conf: 0n,
+      exponent: -20,
+      publishTime: clock.unixTimestamp,
+    });
+
+    context.setAccount(mockPythKp.publicKey, {
+      lamports: 1_000_000_000,
+      data: pythData,
+      owner: fakePythProgramId,
+      executable: false,
+    });
+
+    try {
+      await oracleProgram.methods
+        .getPrice()
+        .accounts({
+          config: configPda,
+          feed: feedPda2,
+          pythPriceUpdate: mockPythKp.publicKey,
+        })
+        .rpc();
+      assert.fail("should reject zero-normalized price");
+    } catch (err: any) {
+      assert.include(err.toString(), "InvalidPrice");
+    }
+  });
+
   it("normalizes Pyth price to 8 decimals", async () => {
     // Price with exponent -5 (fewer decimals). Oracle should
     // multiply by 10^3 to reach 8 decimals.

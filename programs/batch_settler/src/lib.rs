@@ -309,8 +309,15 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
-        // Burn only this MM's custodied oTokens, not entire account
-        let burn_amount = ctx.accounts.maker_otoken_balance.balance;
+        // Burn only the oTokens still associated with this specific
+        // vault. The maker balance is aggregate per (maker, oToken);
+        // using it here would let one emergency withdrawal clear
+        // unrelated custody for the same maker/mint.
+        let burn_amount = ctx.accounts.vault_mm.remaining_amount;
+        require!(
+            ctx.accounts.maker_otoken_balance.balance >= burn_amount,
+            SettlerError::InsufficientMMBalance
+        );
         if burn_amount > 0 {
             token_interface::burn_checked(
                 CpiContext::new_with_signer(
@@ -327,9 +334,14 @@ pub mod batch_settler {
             )?;
         }
 
-        // Clear MM balance
+        // Clear only this vault's remaining custody from the aggregate
+        // MM balance.
         let mm_bal = &mut ctx.accounts.maker_otoken_balance;
-        mm_bal.balance = 0;
+        mm_bal.balance = mm_bal
+            .balance
+            .checked_sub(burn_amount)
+            .ok_or(SettlerError::MathOverflow)?;
+        ctx.accounts.vault_mm.remaining_amount = 0;
 
         // CPI to controller: mark vault settled, return collateral
         controller::cpi::emergency_withdraw_vault(CpiContext::new_with_signer(
@@ -1189,6 +1201,18 @@ pub struct EmergencyWithdrawOrder<'info> {
         bump = maker_otoken_balance.bump,
     )]
     pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
+    #[account(
+        mut,
+        seeds = [b"vault_mm", vault.key().as_ref()],
+        bump = vault_mm.bump,
+        constraint = vault_mm.vault == vault.key()
+            @ SettlerError::Unauthorized,
+        constraint = vault_mm.maker == maker_otoken_balance.maker
+            @ SettlerError::Unauthorized,
+        constraint = vault_mm.otoken_mint == otoken_mint.key()
+            @ SettlerError::InvalidCustodyAccount,
+    )]
+    pub vault_mm: Box<Account<'info, VaultMM>>,
 
     pub controller_program: Program<'info, ControllerProgram>,
     pub otoken_token_program: Interface<'info, TokenInterface>,

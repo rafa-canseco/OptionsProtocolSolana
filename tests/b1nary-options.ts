@@ -2589,6 +2589,9 @@ describe("b1nary-options", () => {
               otokenMint: otokenMint,
               settlerOtokenAccount: settlerOtokenAccount,
               makerOtokenBalance: makerOTokenBalancePda,
+              vaultMm: findVaultMMPda(
+                vaultPda, batchSettlerProgram.programId
+              )[0],
               controllerProgram: controllerProgram.programId,
               otokenTokenProgram: TOKEN_PROGRAM_ID,
               collateralTokenProgram: TOKEN_PROGRAM_ID,
@@ -2607,6 +2610,65 @@ describe("b1nary-options", () => {
         }
 
         // Unpause for remaining tests
+        await controllerProgram.methods
+          .setFullyPaused(false)
+          .accounts({ admin: admin.publicKey })
+          .rpc();
+      });
+
+      it("emergency withdraw: rejects vault/MM binding mismatch (NM-V6-001)", async () => {
+        await controllerProgram.methods
+          .setFullyPaused(true)
+          .accounts({ admin: admin.publicKey })
+          .rpc();
+
+        const wrongMaker = Keypair.generate();
+        await fundAccount(provider, wrongMaker.publicKey, LAMPORTS_PER_SOL);
+        const [wrongMakerBalancePda] = findMakerOTokenBalancePda(
+          wrongMaker.publicKey,
+          otokenMint,
+          batchSettlerProgram.programId
+        );
+
+        try {
+          await batchSettlerProgram.methods
+            .emergencyWithdraw()
+            .accounts({
+              settlerConfig: settlerConfigPda,
+              beneficiary: user.publicKey,
+              controllerConfig: controllerConfigPda,
+              vault: vaultPda,
+              poolTokenAccount: poolTokenAccount,
+              collateralMintAccount: collateralMint,
+              beneficiaryTokenAccount: userCollateralAccount,
+              poolVaultAuthority: poolVaultAuthPda,
+              maker: wrongMaker.publicKey,
+              otokenMint: otokenMint,
+              settlerOtokenAccount: settlerOtokenAccount,
+              makerOtokenBalance: wrongMakerBalancePda,
+              vaultMm: findVaultMMPda(
+                vaultPda,
+                batchSettlerProgram.programId
+              )[0],
+              controllerProgram: controllerProgram.programId,
+              otokenTokenProgram: TOKEN_PROGRAM_ID,
+              collateralTokenProgram: TOKEN_PROGRAM_ID,
+            })
+            .signers([user])
+            .rpc();
+          assert.fail("should reject mismatched vault MM binding");
+        } catch (err: any) {
+          if (err.message === "should reject mismatched vault MM binding") {
+            throw err;
+          }
+          assert.ok(
+            err.toString().includes("AccountNotInitialized") ||
+              err.toString().includes("Unauthorized") ||
+              err.toString().includes("ConstraintRaw"),
+            `expected account/binding failure, got: ${err.toString()}`
+          );
+        }
+
         await controllerProgram.methods
           .setFullyPaused(false)
           .accounts({ admin: admin.publicKey })
@@ -2636,6 +2698,9 @@ describe("b1nary-options", () => {
             otokenMint: otokenMint,
             settlerOtokenAccount: settlerOtokenAccount,
             makerOtokenBalance: makerOTokenBalancePda,
+            vaultMm: findVaultMMPda(
+              vaultPda, batchSettlerProgram.programId
+            )[0],
             controllerProgram: controllerProgram.programId,
             otokenTokenProgram: TOKEN_PROGRAM_ID,
             collateralTokenProgram: TOKEN_PROGRAM_ID,

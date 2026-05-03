@@ -132,6 +132,7 @@ pub mod oracle {
         )?;
 
         validate_staleness(pyth.publish_time, config.max_staleness_secs)?;
+        validate_confidence(pyth.price, pyth.conf, config.max_confidence_bps)?;
 
         let pyth_normalized = normalize_to_8_decimals(pyth.price, pyth.exponent)?;
 
@@ -689,14 +690,17 @@ fn normalize_to_8_decimals(price: i64, exponent: i32) -> Result<u64> {
         let factor = 10u64
             .checked_pow((-diff) as u32)
             .ok_or(OracleError::MathOverflow)?;
-        Ok(p / factor)
+        let normalized = p / factor;
+        require!(normalized > 0, OracleError::InvalidPrice);
+        Ok(normalized)
     } else {
         Ok(p)
     }
 }
 
 fn validate_price_deviation(submitted: u64, reference: u64, threshold_bps: u16) -> Result<()> {
-    if threshold_bps == 0 || reference == 0 {
+    require!(reference > 0, OracleError::InvalidPrice);
+    if threshold_bps == 0 {
         return Ok(());
     }
     let diff = submitted.abs_diff(reference);
