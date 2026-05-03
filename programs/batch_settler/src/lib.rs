@@ -309,15 +309,14 @@ pub mod batch_settler {
         let bump = ctx.accounts.settler_config.bump;
         let signer_seeds: &[&[&[u8]]] = &[&[b"settler_config", &[bump]]];
 
-        // Burn only the oTokens still associated with this specific
-        // vault. The maker balance is aggregate per (maker, oToken);
-        // using it here would let one emergency withdrawal clear
-        // unrelated custody for the same maker/mint.
-        let burn_amount = ctx.accounts.vault_mm.remaining_amount;
-        require!(
-            ctx.accounts.maker_otoken_balance.balance >= burn_amount,
-            SettlerError::InsufficientMMBalance
-        );
+        // Burn only custody still available for this maker/mint. The
+        // vault-specific amount can drift downward from MM redemptions;
+        // emergency withdrawal must not block the beneficiary in that state.
+        let burn_amount = ctx
+            .accounts
+            .vault_mm
+            .remaining_amount
+            .min(ctx.accounts.maker_otoken_balance.balance);
         if burn_amount > 0 {
             token_interface::burn_checked(
                 CpiContext::new_with_signer(
