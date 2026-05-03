@@ -21,6 +21,10 @@
  * same value on re-runs so the script stays idempotent. Without it,
  * the keypairs would be derivable from the public repo and an attacker
  * could front-run the deploy by initializing the same accounts first.
+ *
+ * Current whitelist program only supports oToken allowlisting. Asset
+ * and product allowlists were removed from the on-chain surface, so
+ * this setup only initializes whitelist config and records the factory.
  */
 // @ts-nocheck
 import * as anchor from "@coral-xyz/anchor";
@@ -233,41 +237,9 @@ async function main() {
     await tryRpc("whitelist.initialize", () =>
       programs.whitelist.methods.initialize(admin).accounts({ payer: admin }).rpc()
     );
-    for (const [name, mint] of [["SOL", MINTS.WSOL.mint], ["TSLAx", MINTS.TSLAX.mint]]) {
-      await tryRpc(`whitelist.underlying(${name})`, () =>
-        programs.whitelist.methods
-          .whitelistUnderlying(mint, Array.from(Buffer.from(name.padEnd(8, "\0"))))
-          .accounts({ admin })
-          .rpc()
-      );
-    }
-    for (const [name, mint] of [["USDC", MINTS.USDC.mint], ["wSOL", MINTS.WSOL.mint], ["TSLAx", MINTS.TSLAX.mint]]) {
-      await tryRpc(`whitelist.collateral(${name})`, () =>
-        programs.whitelist.methods
-          .whitelistCollateral(mint, Array.from(Buffer.from(name.padEnd(8, "\0"))))
-          .accounts({ admin })
-          .rpc()
-      );
-    }
-
-    const products = [
-      ["SOL-put", MINTS.WSOL.mint, MINTS.USDC.mint, true],
-      ["SOL-call", MINTS.WSOL.mint, MINTS.WSOL.mint, false],
-      ["TSLAx-put", MINTS.TSLAX.mint, MINTS.USDC.mint, true],
-      ["TSLAx-call", MINTS.TSLAX.mint, MINTS.TSLAX.mint, false],
-    ];
-    for (const [name, underlying, collateral, isPut] of products) {
-      const product = findPda(
-        [Buffer.from("product"), underlying.toBuffer(), collateral.toBuffer(), Buffer.from([isPut ? 1 : 0])],
-        programs.whitelist.programId,
-      );
-      await tryRpc(`whitelist.product(${name})`, () =>
-        programs.whitelist.methods
-          .whitelistProduct(underlying, MINTS.USDC.mint, collateral, isPut)
-          .accounts({ product, admin })
-          .rpc()
-      );
-    }
+    await tryRpc("whitelist.setFactory", () =>
+      programs.whitelist.methods.setFactory(programs.otokenFactory.programId).accounts({ admin }).rpc()
+    );
 
     await tryRpc("oracle.initialize", () =>
       programs.oracle.methods
