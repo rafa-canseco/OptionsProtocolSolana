@@ -21,7 +21,6 @@ import {
 import { createMint, createAccount } from "@solana/spl-token";
 import * as crypto from "crypto";
 
-import { AddressBook } from "../target/types/address_book";
 import { Whitelist } from "../target/types/whitelist";
 import { Oracle } from "../target/types/oracle";
 import { Controller } from "../target/types/controller";
@@ -135,31 +134,6 @@ async function createMockTokens(
   }
   console.log(`  wSOL: ${NATIVE_SOL_MINT.toBase58()} (native)`);
   return { usdc: addresses[0], tslax: addresses[1] };
-}
-
-async function initAddressBook(
-  program: Program<AddressBook>,
-  admin: PublicKey,
-  pdas: Record<string, PublicKey>
-) {
-  console.log("\n=== Initializing AddressBook ===");
-  await tryRpc("initialize", () =>
-    program.methods.initialize(admin).accounts({ payer: admin }).rpc()
-  );
-
-  const entries: [object, PublicKey, string][] = [
-    [{ controller: {} }, pdas.controller, "controller"],
-    [{ marginPool: {} }, pdas.marginPool, "marginPool"],
-    [{ oracle: {} }, pdas.oracle, "oracle"],
-    [{ whitelist: {} }, pdas.whitelist, "whitelist"],
-    [{ otokenFactory: {} }, pdas.factory, "otokenFactory"],
-    [{ batchSettler: {} }, pdas.settler, "batchSettler"],
-  ];
-  for (const [role, addr, name] of entries) {
-    await tryRpc(`setAddress(${name})`, () =>
-      program.methods.setAddress(role, addr).accounts({ admin }).rpc()
-    );
-  }
 }
 
 async function initWhitelist(
@@ -299,13 +273,9 @@ async function initMarginPool(
     [Buffer.from("margin_pool_config")],
     program.programId
   );
-  // Kamino Lend program on devnet (klend)
-  const KAMINO_PROGRAM = new PublicKey(
-    "KLend2g3cP87ber8gvpP8oqaEYAkvzVsSNBaFETqK72"
-  );
   await tryRpc("initialize", () =>
     program.methods
-      .initialize(controllerConfigPda, admin, admin, KAMINO_PROGRAM)
+      .initialize(controllerConfigPda, admin, admin)
       .accounts({ admin })
       .rpc()
   );
@@ -432,7 +402,6 @@ async function main() {
   }
 
   const programs = {
-    addressBook: anchor.workspace.addressBook as Program<AddressBook>,
     whitelist: anchor.workspace.whitelist as Program<Whitelist>,
     oracle: anchor.workspace.oracle as Program<Oracle>,
     controller: anchor.workspace.controller as Program<Controller>,
@@ -476,7 +445,6 @@ async function main() {
     admin.publicKey
   );
 
-  await initAddressBook(programs.addressBook, admin.publicKey, pdas);
   await initWhitelist(programs.whitelist, admin.publicKey, tokens);
   await initOracle(programs.oracle, admin.publicKey, tokens);
   await initController(programs.controller, admin.publicKey);

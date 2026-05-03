@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Burn, Mint, MintTo, Token, TokenAccount};
+use anchor_spl::token_interface::{
+    self, BurnChecked, Mint, MintTo, TokenAccount, TokenInterface, TransferChecked,
+};
 
 declare_id!("FH3z4BYRZMFU8YzpJoFXUbrdoYksdERnWbZvDAEc3qcC");
 
@@ -85,16 +87,18 @@ pub mod controller {
             ControllerError::CollateralMismatch
         );
 
-        token::transfer(
+        token_interface::transfer_checked(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                anchor_spl::token::Transfer {
+                ctx.accounts.collateral_token_program.to_account_info(),
+                TransferChecked {
                     from: ctx.accounts.user_token_account.to_account_info(),
+                    mint: ctx.accounts.collateral_mint_account.to_account_info(),
                     to: ctx.accounts.pool_token_account.to_account_info(),
                     authority: ctx.accounts.owner.to_account_info(),
                 },
             ),
             amount,
+            ctx.accounts.collateral_mint_account.decimals,
         )?;
 
         vault.collateral_amount = vault
@@ -160,9 +164,9 @@ pub mod controller {
         let seeds = &[b"controller_config".as_ref(), &[config_bump]];
         let signer_seeds = &[&seeds[..]];
 
-        token::mint_to(
+        token_interface::mint_to(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.otoken_token_program.to_account_info(),
                 MintTo {
                     mint: ctx.accounts.otoken_mint.to_account_info(),
                     to: ctx.accounts.destination.to_account_info(),
@@ -229,17 +233,19 @@ pub mod controller {
             ];
             let signer_seeds = &[&seeds[..]];
 
-            token::transfer(
+            token_interface::transfer_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    anchor_spl::token::Transfer {
+                    ctx.accounts.collateral_token_program.to_account_info(),
+                    TransferChecked {
                         from: ctx.accounts.pool_token_account.to_account_info(),
+                        mint: ctx.accounts.collateral_mint_account.to_account_info(),
                         to: ctx.accounts.beneficiary_token_account.to_account_info(),
                         authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
                 ),
                 collateral_returned,
+                ctx.accounts.collateral_mint_account.decimals,
             )?;
         }
 
@@ -278,16 +284,17 @@ pub mod controller {
             amount,
         )?;
 
-        token::burn(
+        token_interface::burn_checked(
             CpiContext::new(
-                ctx.accounts.token_program.to_account_info(),
-                Burn {
+                ctx.accounts.otoken_token_program.to_account_info(),
+                BurnChecked {
                     mint: ctx.accounts.otoken_mint.to_account_info(),
                     from: ctx.accounts.redeemer_otoken_account.to_account_info(),
                     authority: ctx.accounts.redeemer.to_account_info(),
                 },
             ),
             amount,
+            ctx.accounts.otoken_mint.decimals,
         )?;
 
         if payout > 0 {
@@ -300,17 +307,19 @@ pub mod controller {
             ];
             let signer_seeds = &[&seeds[..]];
 
-            token::transfer(
+            token_interface::transfer_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    anchor_spl::token::Transfer {
+                    ctx.accounts.collateral_token_program.to_account_info(),
+                    TransferChecked {
                         from: ctx.accounts.pool_token_account.to_account_info(),
+                        mint: ctx.accounts.collateral_mint_account.to_account_info(),
                         to: ctx.accounts.redeemer_collateral_account.to_account_info(),
                         authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
                 ),
                 payout,
+                ctx.accounts.collateral_mint_account.decimals,
             )?;
         }
 
@@ -373,17 +382,19 @@ pub mod controller {
             ];
             let signer_seeds = &[&seeds[..]];
 
-            token::transfer(
+            token_interface::transfer_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    anchor_spl::token::Transfer {
+                    ctx.accounts.collateral_token_program.to_account_info(),
+                    TransferChecked {
                         from: ctx.accounts.pool_token_account.to_account_info(),
+                        mint: ctx.accounts.collateral_mint_account.to_account_info(),
                         to: ctx.accounts.beneficiary_token_account.to_account_info(),
                         authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     },
                     signer_seeds,
                 ),
                 collateral_amount,
+                ctx.accounts.collateral_mint_account.decimals,
             )?;
         }
 
@@ -556,7 +567,7 @@ pub struct InitializeConfig<'info> {
         seeds = [b"controller_config"],
         bump,
     )]
-    pub config: Account<'info, ControllerConfig>,
+    pub config: Box<Account<'info, ControllerConfig>>,
     #[account(mut)]
     pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -586,7 +597,7 @@ pub struct OpenVault<'info> {
         seeds = [b"controller_config"],
         bump = config.bump,
     )]
-    pub config: Account<'info, ControllerConfig>,
+    pub config: Box<Account<'info, ControllerConfig>>,
     #[account(
         init,
         payer = owner,
@@ -598,7 +609,7 @@ pub struct OpenVault<'info> {
         ],
         bump,
     )]
-    pub vault: Account<'info, Vault>,
+    pub vault: Box<Account<'info, Vault>>,
     #[account(
         mut,
         seeds = [
@@ -631,9 +642,15 @@ pub struct DepositCollateral<'info> {
         ],
         bump = vault.bump,
     )]
-    pub vault: Account<'info, Vault>,
+    pub vault: Box<Account<'info, Vault>>,
     #[account(mut)]
-    pub user_token_account: Account<'info, TokenAccount>,
+    pub user_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(
+        constraint = collateral_mint_account.key()
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub collateral_mint_account: InterfaceAccount<'info, Mint>,
     #[account(
         mut,
         constraint = pool_token_account.mint
@@ -643,7 +660,7 @@ pub struct DepositCollateral<'info> {
             == pool_vault_authority.key()
             @ ControllerError::Unauthorized,
     )]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: InterfaceAccount<'info, TokenAccount>,
     /// CHECK: PDA authority for the protocol pool, validated by seeds.
     #[account(
         seeds = [
@@ -655,7 +672,7 @@ pub struct DepositCollateral<'info> {
     pub pool_vault_authority: AccountInfo<'info>,
     #[account(mut)]
     pub owner: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -677,23 +694,23 @@ pub struct MintOtoken<'info> {
         ],
         bump,
     )]
-    pub otoken_info: Account<'info, OTokenInfo>,
+    pub otoken_info: Box<Account<'info, OTokenInfo>>,
     #[account(
         mut,
         constraint = otoken_mint.key()
             == otoken_info.otoken_mint,
     )]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: InterfaceAccount<'info, Mint>,
     #[account(
         mut,
         constraint = destination.mint
             == otoken_mint.key()
             @ ControllerError::OtokenMismatch,
     )]
-    pub destination: Account<'info, TokenAccount>,
+    pub destination: InterfaceAccount<'info, TokenAccount>,
     #[account(mut)]
     pub owner: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -703,7 +720,7 @@ pub struct SettleVault<'info> {
         bump = config.bump,
         has_one = admin,
     )]
-    pub config: Account<'info, ControllerConfig>,
+    pub config: Box<Account<'info, ControllerConfig>>,
     #[account(
         mut,
         seeds = [
@@ -713,7 +730,7 @@ pub struct SettleVault<'info> {
         ],
         bump = vault.bump,
     )]
-    pub vault: Account<'info, Vault>,
+    pub vault: Box<Account<'info, Vault>>,
     #[account(
         constraint = otoken_info.otoken_mint
             == vault.otoken_mint
@@ -724,7 +741,7 @@ pub struct SettleVault<'info> {
         ],
         bump,
     )]
-    pub otoken_info: Account<'info, OTokenInfo>,
+    pub otoken_info: Box<Account<'info, OTokenInfo>>,
     #[account(
         mut,
         constraint = pool_token_account.mint
@@ -734,7 +751,13 @@ pub struct SettleVault<'info> {
             == pool_vault_authority.key()
             @ ControllerError::Unauthorized,
     )]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        constraint = collateral_mint_account.key()
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub collateral_mint_account: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mut,
         constraint = beneficiary_token_account.owner
@@ -744,7 +767,7 @@ pub struct SettleVault<'info> {
             == vault.collateral_mint
             @ ControllerError::CollateralMismatch,
     )]
-    pub beneficiary_token_account: Account<'info, TokenAccount>,
+    pub beneficiary_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: PDA authority for pool vault, validated by seeds
     #[account(
         seeds = [
@@ -755,7 +778,7 @@ pub struct SettleVault<'info> {
     )]
     pub pool_vault_authority: AccountInfo<'info>,
     pub admin: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -764,7 +787,7 @@ pub struct Redeem<'info> {
         seeds = [b"controller_config"],
         bump = config.bump,
     )]
-    pub config: Account<'info, ControllerConfig>,
+    pub config: Box<Account<'info, ControllerConfig>>,
     #[account(
         seeds = [
             b"otoken_info",
@@ -772,13 +795,13 @@ pub struct Redeem<'info> {
         ],
         bump,
     )]
-    pub otoken_info: Account<'info, OTokenInfo>,
+    pub otoken_info: Box<Account<'info, OTokenInfo>>,
     #[account(
         mut,
         constraint = otoken_mint.key()
             == otoken_info.otoken_mint,
     )]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mut,
         constraint = redeemer_otoken_account.mint
@@ -787,7 +810,7 @@ pub struct Redeem<'info> {
             == redeemer.key()
             @ ControllerError::Unauthorized,
     )]
-    pub redeemer_otoken_account: Account<'info, TokenAccount>,
+    pub redeemer_otoken_account: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         constraint = redeemer_collateral_account.mint
@@ -797,7 +820,7 @@ pub struct Redeem<'info> {
             == redeemer.key()
             @ ControllerError::Unauthorized,
     )]
-    pub redeemer_collateral_account: Account<'info, TokenAccount>,
+    pub redeemer_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         constraint = pool_token_account.mint
@@ -807,7 +830,13 @@ pub struct Redeem<'info> {
             == pool_vault_authority.key()
             @ ControllerError::Unauthorized,
     )]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        constraint = collateral_mint_account.key()
+            == otoken_info.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub collateral_mint_account: Box<InterfaceAccount<'info, Mint>>,
     /// CHECK: PDA authority for pool vault, validated by seeds
     #[account(
         seeds = [
@@ -823,7 +852,8 @@ pub struct Redeem<'info> {
     /// caller (including PDAs CPI'd from other programs) to also pass
     /// it as writable in their outer context, causing privilege escalation.
     pub redeemer: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -868,7 +898,7 @@ pub struct CreateOTokenInfo<'info> {
             == factory_otoken.collateral
             @ ControllerError::CollateralMismatch,
     )]
-    pub collateral_mint_account: Account<'info, Mint>,
+    pub collateral_mint_account: InterfaceAccount<'info, Mint>,
     /// Whitelist entry proves this oToken is approved.
     #[account(
         seeds = [b"whitelisted_otoken", otoken_mint.key().as_ref()],
@@ -973,7 +1003,13 @@ pub struct EmergencyWithdrawVault<'info> {
             == pool_vault_authority.key()
             @ ControllerError::Unauthorized,
     )]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(
+        constraint = collateral_mint_account.key()
+            == vault.collateral_mint
+            @ ControllerError::CollateralMismatch,
+    )]
+    pub collateral_mint_account: InterfaceAccount<'info, Mint>,
     #[account(
         mut,
         constraint = beneficiary_token_account.owner
@@ -983,7 +1019,7 @@ pub struct EmergencyWithdrawVault<'info> {
             == vault.collateral_mint
             @ ControllerError::CollateralMismatch,
     )]
-    pub beneficiary_token_account: Account<'info, TokenAccount>,
+    pub beneficiary_token_account: InterfaceAccount<'info, TokenAccount>,
     /// CHECK: PDA authority for pool vault
     #[account(
         seeds = [
@@ -994,7 +1030,7 @@ pub struct EmergencyWithdrawVault<'info> {
     )]
     pub pool_vault_authority: AccountInfo<'info>,
     pub owner: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[event]

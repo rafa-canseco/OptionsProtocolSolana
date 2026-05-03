@@ -294,8 +294,7 @@ describe("b1nary-options", () => {
         .initialize(
           controllerPk,
           admin.publicKey,              // operator
-          admin.publicKey,              // yield_recipient
-          Keypair.generate().publicKey   // kamino_program (dummy)
+          admin.publicKey               // yield_recipient
         )
         .accounts({
           admin: admin.publicKey,

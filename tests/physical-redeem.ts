@@ -572,10 +572,11 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
       config: controllerConfigPda,
       vault: vaultPda,
       userTokenAccount: adminCollateralAccount,
+      collateralMintAccount: collateralMint,
       poolTokenAccount,
       poolVaultAuthority: poolVaultAuthPda,
       owner: admin.publicKey,
-      tokenProgram: TOKEN_PROGRAM_ID,
+      collateralTokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([admin])
     .rpc();
@@ -601,7 +602,7 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
       otokenMint,
       destination: adminOtokenAccount,
       owner: admin.publicKey,
-      tokenProgram: TOKEN_PROGRAM_ID,
+      otokenTokenProgram: TOKEN_PROGRAM_ID,
     })
     .signers([admin])
     .rpc();
@@ -865,6 +866,7 @@ async function callPhysicalRedeem(s: Scenario, route: { data: Buffer; accounts: 
       controllerConfig: s.controllerConfigPda,
       otokenInfo: s.otokenInfoPda,
       otokenMint: s.otokenMint,
+      collateralMintAccount: s.collateralMint,
       vault: s.vaultPda,
       settlerOtokenAccount: s.settlerOtokenAccount,
       settlerCollateralAccount: s.settlerCollateralAccount,
@@ -877,7 +879,9 @@ async function callPhysicalRedeem(s: Scenario, route: { data: Buffer; accounts: 
       poolVaultAuthority: s.poolVaultAuthPda,
       jupiterProgram: s.mockJupiterProgram.programId,
       controllerProgram: s.controllerProgram.programId,
-      tokenProgram: TOKEN_PROGRAM_ID,
+      otokenTokenProgram: TOKEN_PROGRAM_ID,
+      collateralTokenProgram: TOKEN_PROGRAM_ID,
+      contraTokenProgram: TOKEN_PROGRAM_ID,
     })
     .remainingAccounts(route.accounts)
     .signers([s.operator])
@@ -984,6 +988,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            collateralMintAccount: s.collateralMint,
             vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
@@ -996,7 +1001,9 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             poolVaultAuthority: s.poolVaultAuthPda,
             jupiterProgram: s.mockJupiterProgram.programId,
             controllerProgram: s.controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            contraTokenProgram: TOKEN_PROGRAM_ID,
           })
           .remainingAccounts(route.accounts)
           .signers([s.operator])
@@ -1239,6 +1246,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            collateralMintAccount: s.collateralMint,
             vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
@@ -1251,7 +1259,9 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             poolVaultAuthority: s.poolVaultAuthPda,
             jupiterProgram: s.mockJupiterProgram.programId,
             controllerProgram: s.controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            contraTokenProgram: TOKEN_PROGRAM_ID,
           })
           .remainingAccounts(route.accounts)
           .signers([s.operator])
@@ -1277,6 +1287,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            collateralMintAccount: s.collateralMint,
             vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
@@ -1289,7 +1300,9 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             poolVaultAuthority: s.poolVaultAuthPda,
             jupiterProgram: s.mockJupiterProgram.programId,
             controllerProgram: s.controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            contraTokenProgram: TOKEN_PROGRAM_ID,
           })
           .remainingAccounts(route.accounts)
           .signers([s.operator])
@@ -1316,6 +1329,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            collateralMintAccount: s.collateralMint,
             vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
@@ -1328,7 +1342,9 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             poolVaultAuthority: s.poolVaultAuthPda,
             jupiterProgram: s.controllerProgram.programId,
             controllerProgram: s.controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            contraTokenProgram: TOKEN_PROGRAM_ID,
           })
           .remainingAccounts(route.accounts)
           .signers([s.operator])
@@ -1362,6 +1378,7 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             controllerConfig: s.controllerConfigPda,
             otokenInfo: s.otokenInfoPda,
             otokenMint: s.otokenMint,
+            collateralMintAccount: s.collateralMint,
             vault: s.vaultPda,
             settlerOtokenAccount: s.settlerOtokenAccount,
             settlerCollateralAccount: s.settlerCollateralAccount,
@@ -1374,7 +1391,9 @@ describe("batch_settler::physical_redeem (no flash loan)", () => {
             poolVaultAuthority: s.poolVaultAuthPda,
             jupiterProgram: s.mockJupiterProgram.programId,
             controllerProgram: s.controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            contraTokenProgram: TOKEN_PROGRAM_ID,
           })
           .remainingAccounts(route.accounts)
           .signers([s.operator])
