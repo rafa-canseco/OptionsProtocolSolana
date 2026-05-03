@@ -243,6 +243,23 @@ async function fundAccount(
   pubkey: PublicKey,
   lamports: number
 ) {
+  try {
+    const signature = await provider.connection.requestAirdrop(
+      pubkey,
+      lamports
+    );
+    const { blockhash, lastValidBlockHeight } =
+      await provider.connection.getLatestBlockhash();
+    await provider.connection.confirmTransaction({
+      signature,
+      blockhash,
+      lastValidBlockHeight,
+    });
+    return;
+  } catch (_err) {
+    // Non-local clusters may not expose a faucet; keep the transfer fallback.
+  }
+
   const tx = new anchor.web3.Transaction().add(
     SystemProgram.transfer({
       fromPubkey: provider.wallet.publicKey,
@@ -399,6 +416,7 @@ describe("b1nary-options", () => {
           config: configPda,
           poolVault: poolVaultPda,
           userTokenAccount: userTokenAccount,
+          collateralMint: collateralMint,
           vaultTokenAccount: vaultTokenAccount,
           userAuthority: admin.publicKey,
           recipient: admin.publicKey,
@@ -435,6 +453,7 @@ describe("b1nary-options", () => {
             config: configPda,
             poolVault: poolVaultPda,
             userTokenAccount: userTokenAccount,
+            collateralMint: collateralMint,
             vaultTokenAccount: vaultTokenAccount,
             userAuthority: admin.publicKey,
             recipient: admin.publicKey,
@@ -461,6 +480,7 @@ describe("b1nary-options", () => {
           poolVault: poolVaultPda,
           vaultTokenAccount: vaultTokenAccount,
           userTokenAccount: userTokenAccount,
+          collateralMint: collateralMint,
           vaultAuthority: vaultAuthPda,
           recipient: admin.publicKey,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -498,6 +518,7 @@ describe("b1nary-options", () => {
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,
+            collateralMint: collateralMint,
             vaultAuthority: vaultAuthPda,
             recipient: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
@@ -522,6 +543,7 @@ describe("b1nary-options", () => {
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,
+            collateralMint: collateralMint,
             vaultAuthority: vaultAuthPda,
             recipient: admin.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
@@ -556,6 +578,7 @@ describe("b1nary-options", () => {
             poolVault: poolVaultPda,
             vaultTokenAccount: vaultTokenAccount,
             userTokenAccount: userTokenAccount,
+            collateralMint: collateralMint,
             vaultAuthority: vaultAuthPda,
             recipient: rando.publicKey,
             tokenProgram: TOKEN_PROGRAM_ID,
@@ -874,10 +897,11 @@ describe("b1nary-options", () => {
           config: configPda,
           vault: vaultPda,
           userTokenAccount: userCollateralAccount,
+          collateralMintAccount: collateralMint,
           poolTokenAccount: poolTokenAccount,
           poolVaultAuthority: poolVaultAuthPda,
           owner: admin.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
+          collateralTokenProgram: TOKEN_PROGRAM_ID,
         })
         .rpc();
 
@@ -908,10 +932,11 @@ describe("b1nary-options", () => {
             config: configPda,
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
+            collateralMintAccount: collateralMint,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();
         assert.fail("should reject zero deposit");
@@ -959,10 +984,8 @@ describe("b1nary-options", () => {
           otokenInfo: otokenInfoPda,
           otokenMint: otokenMint,
           destination: ownerOtokenAccount,
-          whitelistedOtoken: wlPda,
-          whitelistProgram: whitelistProgram.programId,
           owner: admin.publicKey,
-          tokenProgram: TOKEN_PROGRAM_ID,
+          otokenTokenProgram: TOKEN_PROGRAM_ID,
         })
         .rpc();
 
@@ -1053,7 +1076,7 @@ describe("b1nary-options", () => {
             otokenMint: otokenMint,
             destination: ownerOtokenAccount,
             owner: admin.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();
         assert.fail("should reject insufficient collateral");
@@ -1085,10 +1108,11 @@ describe("b1nary-options", () => {
             vault: vaultPda,
             otokenInfo: otokenInfoPda,
             poolTokenAccount: poolTokenAccount,
+            collateralMintAccount: collateralMint,
             beneficiaryTokenAccount: tempBeneficiaryAcct,
             poolVaultAuthority: poolVaultAuthPda,
             admin: admin.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();
         assert.fail("should reject non-expired vault");
@@ -1212,10 +1236,11 @@ describe("b1nary-options", () => {
             config: configPda,
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
+            collateralMintAccount: collateralMint,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();
         assert.fail("should reject deposit when paused");
@@ -1293,10 +1318,11 @@ describe("b1nary-options", () => {
             config: configPda,
             vault: vaultPda,
             userTokenAccount: userCollateralAccount,
+            collateralMintAccount: collateralMint,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
             owner: admin.publicKey,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .rpc();
         assert.fail("should reject when fully paused");
@@ -2307,11 +2333,6 @@ describe("b1nary-options", () => {
           controllerProgram.programId
         );
         const commonLookupAddresses = [
-          batchSettlerProgram.programId,
-          controllerProgram.programId,
-          TOKEN_PROGRAM_ID,
-          SystemProgram.programId,
-          SYSVAR_INSTRUCTIONS_PUBKEY,
           settlerConfigPda,
           makerStatePda,
           controllerConfigPda,
@@ -2320,6 +2341,8 @@ describe("b1nary-options", () => {
           vaultCounterForSettler,
           otokenInfoPda,
           otokenMint,
+          collateralMint,
+          premiumMint,
           userCollateralAccount,
           poolTokenAccount,
           poolVaultAuthPda,
@@ -2342,6 +2365,14 @@ describe("b1nary-options", () => {
             payer: admin.publicKey,
             recentSlot,
           });
+        await provider.sendAndConfirm(
+          new Transaction().add(createLookupIx)
+        );
+        const createWarmupSlot = await connection.getSlot("confirmed");
+        while ((await connection.getSlot("confirmed")) <= createWarmupSlot) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+
         const extendLookupIx = AddressLookupTableProgram.extendLookupTable({
           authority: admin.publicKey,
           payer: admin.publicKey,
@@ -2349,14 +2380,31 @@ describe("b1nary-options", () => {
           addresses: commonLookupAddresses,
         });
         await provider.sendAndConfirm(
-          new Transaction().add(createLookupIx, extendLookupIx)
+          new Transaction().add(extendLookupIx)
         );
-        const warmupSlot = await connection.getSlot("confirmed");
-        while ((await connection.getSlot("confirmed")) <= warmupSlot) {
+
+        const extendWarmupSlot = await connection.getSlot("confirmed");
+        while ((await connection.getSlot("confirmed")) <= extendWarmupSlot) {
           await new Promise((resolve) => setTimeout(resolve, 400));
         }
-        const lookupTable =
-          await connection.getAddressLookupTable(lookupTableAddress);
+        while ((await connection.getSlot("finalized")) <= extendWarmupSlot) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+        let lookupTable =
+          await connection.getAddressLookupTable(lookupTableAddress, {
+            commitment: "finalized",
+          });
+        while (
+          !lookupTable.value ||
+          lookupTable.value.state.addresses.length <
+            commonLookupAddresses.length
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          lookupTable =
+            await connection.getAddressLookupTable(lookupTableAddress, {
+              commitment: "finalized",
+            });
+        }
         if (!lookupTable.value) {
           throw new Error("execute_order lookup table not found");
         }
@@ -2401,6 +2449,8 @@ describe("b1nary-options", () => {
               vaultCounter: vaultCounterForSettler,
               otokenInfo: otokenInfoPda,
               otokenMint: otokenMint,
+              collateralMintAccount: collateralMint,
+              premiumMintAccount: premiumMint,
               userCollateralAccount: userCollateralAccount,
               poolTokenAccount: poolTokenAccount,
               poolVaultAuthority: poolVaultAuthPda,
@@ -2415,7 +2465,9 @@ describe("b1nary-options", () => {
               user: user.publicKey,
               maker: maker.publicKey,
               controllerProgram: controllerProgram.programId,
-              tokenProgram: TOKEN_PROGRAM_ID,
+              collateralTokenProgram: TOKEN_PROGRAM_ID,
+              otokenTokenProgram: TOKEN_PROGRAM_ID,
+              premiumTokenProgram: TOKEN_PROGRAM_ID,
               systemProgram: SystemProgram.programId,
               instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
             })
@@ -2530,6 +2582,7 @@ describe("b1nary-options", () => {
               controllerConfig: controllerConfigPda,
               vault: vaultPda,
               poolTokenAccount: poolTokenAccount,
+              collateralMintAccount: collateralMint,
               beneficiaryTokenAccount: userCollateralAccount,
               poolVaultAuthority: poolVaultAuthPda,
               maker: maker.publicKey,
@@ -2537,7 +2590,8 @@ describe("b1nary-options", () => {
               settlerOtokenAccount: settlerOtokenAccount,
               makerOtokenBalance: makerOTokenBalancePda,
               controllerProgram: controllerProgram.programId,
-              tokenProgram: TOKEN_PROGRAM_ID,
+              otokenTokenProgram: TOKEN_PROGRAM_ID,
+              collateralTokenProgram: TOKEN_PROGRAM_ID,
             })
             .signers([maker])
             .rpc();
@@ -2575,6 +2629,7 @@ describe("b1nary-options", () => {
             controllerConfig: controllerConfigPda,
             vault: vaultPda,
             poolTokenAccount: poolTokenAccount,
+            collateralMintAccount: collateralMint,
             beneficiaryTokenAccount: userCollateralAccount,
             poolVaultAuthority: poolVaultAuthPda,
             maker: maker.publicKey,
@@ -2582,7 +2637,8 @@ describe("b1nary-options", () => {
             settlerOtokenAccount: settlerOtokenAccount,
             makerOtokenBalance: makerOTokenBalancePda,
             controllerProgram: controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .signers([user])
           .rpc();
@@ -2712,6 +2768,8 @@ describe("b1nary-options", () => {
             vaultCounter: vaultCounterForSettler,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            collateralMintAccount: collateralMint,
+            premiumMintAccount: premiumMint,
             // Pass the legitimate user's delegated account.
             userCollateralAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
@@ -2731,7 +2789,9 @@ describe("b1nary-options", () => {
             user: attacker.publicKey,
             maker: maker.publicKey,
             controllerProgram: controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            premiumTokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
             instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
           })
@@ -2865,6 +2925,8 @@ describe("b1nary-options", () => {
             vaultCounter: vaultCounterForSettler,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            collateralMintAccount: collateralMint,
+            premiumMintAccount: premiumMint,
             userCollateralAccount: userCollateralAccount,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
@@ -2881,7 +2943,9 @@ describe("b1nary-options", () => {
             user: user.publicKey,
             maker: maker.publicKey, // signed-quote maker
             controllerProgram: controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            premiumTokenProgram: TOKEN_PROGRAM_ID,
             systemProgram: SystemProgram.programId,
             instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
           })
@@ -2968,6 +3032,8 @@ describe("b1nary-options", () => {
               vaultCounter: vaultCounterForSettler,
               otokenInfo: otokenInfoPda,
               otokenMint: otokenMint,
+              collateralMintAccount: collateralMint,
+              premiumMintAccount: premiumMint,
               userCollateralAccount: userCollateralAccount,
               poolTokenAccount: poolTokenAccount,
               poolVaultAuthority: poolVaultAuthPda,
@@ -2982,7 +3048,9 @@ describe("b1nary-options", () => {
               user: user.publicKey,
               maker: maker.publicKey,
               controllerProgram: controllerProgram.programId,
-              tokenProgram: TOKEN_PROGRAM_ID,
+              collateralTokenProgram: TOKEN_PROGRAM_ID,
+              otokenTokenProgram: TOKEN_PROGRAM_ID,
+              premiumTokenProgram: TOKEN_PROGRAM_ID,
               systemProgram: SystemProgram.programId,
               instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
             })
