@@ -190,6 +190,34 @@ function findPoolVaultAuthPda(mint: PublicKey, programId: PublicKey): PublicKey 
   return findPda([Buffer.from("pool_vault_auth"), mint.toBuffer()], programId);
 }
 
+const EXPIRY_PRICE_DISCRIMINATOR = Buffer.from(
+  require("crypto").createHash("sha256").update("account:ExpiryPrice").digest().subarray(0, 8)
+);
+
+function injectOracleExpiryPrice(
+  context: any,
+  pda: PublicKey,
+  oracleProgramId: PublicKey,
+  underlying: PublicKey,
+  expiry: BN,
+  price: BN,
+  bump: number
+): void {
+  const data = Buffer.alloc(8 + 32 + 8 + 8 + 1 + 1);
+  EXPIRY_PRICE_DISCRIMINATOR.copy(data, 0);
+  underlying.toBuffer().copy(data, 8);
+  data.writeBigInt64LE(BigInt(expiry.toString()), 40);
+  data.writeBigUInt64LE(BigInt(price.toString()), 48);
+  data.writeUInt8(1, 56);
+  data.writeUInt8(bump, 57);
+  context.setAccount(pda, {
+    lamports: LAMPORTS_PER_SOL,
+    data,
+    owner: oracleProgramId,
+    executable: false,
+  });
+}
+
 // ── Tests ─────────────────────────────────────────────────
 
 describe("post-expiry instructions", () => {
@@ -200,6 +228,7 @@ describe("post-expiry instructions", () => {
   let batchSettlerProgram: any;
   let whitelistProgram: any;
   let otokenFactoryProgram: any;
+  let oracleProgram: any;
 
   const admin = Keypair.generate();
   const operator = Keypair.generate();
@@ -209,8 +238,12 @@ describe("post-expiry instructions", () => {
   const jupiterProgram = Keypair.generate();
 
   let collateralMint: PublicKey;
+  let underlying: PublicKey;
+  let expiryTimestamp: BN;
   let otokenMint: PublicKey;
   let otokenInfoPda: PublicKey;
+  let oracleExpiryPricePda: PublicKey;
+  let oracleExpiryPriceBump: number;
   let settlerConfigPda: PublicKey;
   let controllerConfigPda: PublicKey;
   let poolTokenAccount: PublicKey;
@@ -251,6 +284,10 @@ describe("post-expiry instructions", () => {
       require("../target/idl/otoken_factory.json"),
       provider as unknown as anchor.AnchorProvider
     );
+    oracleProgram = new Program(
+      require("../target/idl/oracle.json"),
+      provider as unknown as anchor.AnchorProvider
+    );
 
     controllerConfigPda = findControllerConfigPda(controllerProgram.programId);
     settlerConfigPda = findSettlerConfigPda(batchSettlerProgram.programId);
@@ -284,8 +321,8 @@ describe("post-expiry instructions", () => {
 
     // 3. Create canonical oToken + OTokenInfo with near-future expiry
     const clock = await context.banksClient.getClock();
-    const expiryTimestamp = new BN(Number(clock.unixTimestamp) + 100);
-    const underlying = Keypair.generate().publicKey;
+    expiryTimestamp = new BN(Number(clock.unixTimestamp) + 100);
+    underlying = Keypair.generate().publicKey;
     const strikeAsset = Keypair.generate().publicKey;
     const factoryOtokenPda = findFactoryOTokenPda(
       underlying,
@@ -339,6 +376,15 @@ describe("post-expiry instructions", () => {
       .rpc();
 
     otokenInfoPda = findOTokenInfoPda(otokenMint, controllerProgram.programId);
+    [oracleExpiryPricePda, oracleExpiryPriceBump] =
+      PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("expiry_price"),
+          underlying.toBuffer(),
+          expiryTimestamp.toArrayLike(Buffer, "le", 8),
+        ],
+        oracleProgram.programId
+      );
     await controllerProgram.methods
       .createOtokenInfo()
       .accounts({
@@ -386,10 +432,11 @@ describe("post-expiry instructions", () => {
         config: controllerConfigPda,
         vault: vaultPda,
         userTokenAccount: adminCollateralAccount,
+        collateralMintAccount: collateralMint,
         poolTokenAccount: poolTokenAccount,
         poolVaultAuthority: poolVaultAuthPda,
         owner: admin.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        collateralTokenProgram: TOKEN_PROGRAM_ID,
       })
       .signers([admin])
       .rpc();
@@ -408,7 +455,7 @@ describe("post-expiry instructions", () => {
         otokenMint: otokenMint,
         destination: adminOtokenAccount,
         owner: admin.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
+        otokenTokenProgram: TOKEN_PROGRAM_ID,
       })
       .signers([admin])
       .rpc();
@@ -491,10 +538,32 @@ describe("post-expiry instructions", () => {
 
   describe("controller::set_expiry_price", () => {
     it("rejects zero price", async () => {
+      const clock = await context.banksClient.getClock();
+      context.setClock(new Clock(
+        clock.slot,
+        clock.epochStartTimestamp,
+        clock.epoch,
+        clock.leaderScheduleEpoch,
+        BigInt(expiryTimestamp.toNumber() + 200)
+      ));
+      injectOracleExpiryPrice(
+        context,
+        oracleExpiryPricePda,
+        oracleProgram.programId,
+        underlying,
+        expiryTimestamp,
+        new BN(0),
+        oracleExpiryPriceBump
+      );
       try {
         await controllerProgram.methods
-          .setExpiryPrice(new BN(0))
-          .accounts({ admin: admin.publicKey, otokenInfo: otokenInfoPda })
+          .setExpiryPrice()
+          .accounts({
+            admin: admin.publicKey,
+            otokenInfo: otokenInfoPda,
+            oracleExpiryPrice: oracleExpiryPricePda,
+            oracleProgram: oracleProgram.programId,
+          })
           .signers([admin])
           .rpc();
         assert.fail("should reject zero price");
@@ -514,8 +583,13 @@ describe("post-expiry instructions", () => {
 
       try {
         await controllerProgram.methods
-          .setExpiryPrice(new BN("150000000000"))
-          .accounts({ admin: rando.publicKey })
+          .setExpiryPrice()
+          .accounts({
+            admin: rando.publicKey,
+            otokenInfo: otokenInfoPda,
+            oracleExpiryPrice: oracleExpiryPricePda,
+            oracleProgram: oracleProgram.programId,
+          })
           .signers([rando])
           .rpc();
         assert.fail("should reject non-admin");
@@ -527,21 +601,24 @@ describe("post-expiry instructions", () => {
     });
 
     it("sets expiry price successfully", async () => {
-      // Warp clock past expiry first
-      const clock = await context.banksClient.getClock();
-      const newClock = new Clock(
-        clock.slot,
-        clock.epochStartTimestamp,
-        clock.epoch,
-        clock.leaderScheduleEpoch,
-        // Set unix timestamp past expiry
-        BigInt(Number(clock.unixTimestamp) + 200)
+      injectOracleExpiryPrice(
+        context,
+        oracleExpiryPricePda,
+        oracleProgram.programId,
+        underlying,
+        expiryTimestamp,
+        new BN("150000000000"),
+        oracleExpiryPriceBump
       );
-      context.setClock(newClock);
 
       await controllerProgram.methods
-        .setExpiryPrice(new BN("150000000000")) // $1500 — ITM for put (below $2000 strike)
-        .accounts({ admin: admin.publicKey, otokenInfo: otokenInfoPda })
+        .setExpiryPrice()
+        .accounts({
+          admin: admin.publicKey,
+          otokenInfo: otokenInfoPda,
+          oracleExpiryPrice: oracleExpiryPricePda,
+          oracleProgram: oracleProgram.programId,
+        })
         .signers([admin])
         .rpc();
 
@@ -552,8 +629,13 @@ describe("post-expiry instructions", () => {
     it("rejects setting price again (already set)", async () => {
       try {
         await controllerProgram.methods
-          .setExpiryPrice(new BN("160000000000"))
-          .accounts({ admin: admin.publicKey, otokenInfo: otokenInfoPda })
+          .setExpiryPrice()
+          .accounts({
+            admin: admin.publicKey,
+            otokenInfo: otokenInfoPda,
+            oracleExpiryPrice: oracleExpiryPricePda,
+            oracleProgram: oracleProgram.programId,
+          })
           .signers([admin])
           .rpc();
         assert.fail("should reject already set");
@@ -665,13 +747,15 @@ describe("post-expiry instructions", () => {
             controllerConfig: controllerConfigPda,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            collateralMintAccount: collateralMint,
             settlerOtokenAccount: settlerOtokenAccount,
             settlerCollateralAccount: settlerCollateralAccount,
             mmCollateralAccount: mmCollateralAccount,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
             controllerProgram: controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .signers([rando])
           .rpc();
@@ -696,13 +780,15 @@ describe("post-expiry instructions", () => {
             controllerConfig: controllerConfigPda,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            collateralMintAccount: collateralMint,
             settlerOtokenAccount: settlerOtokenAccount,
             settlerCollateralAccount: settlerCollateralAccount,
             mmCollateralAccount: mmCollateralAccount,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
             controllerProgram: controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .signers([operator])
           .rpc();
@@ -754,13 +840,15 @@ describe("post-expiry instructions", () => {
           controllerConfig: controllerConfigPda,
           otokenInfo: otokenInfoPda,
           otokenMint: otokenMint,
+          collateralMintAccount: collateralMint,
           settlerOtokenAccount: settlerOtokenAccount,
           settlerCollateralAccount: settlerCollateralAccount,
           mmCollateralAccount: mmCollateralAccount,
           poolTokenAccount: poolTokenAccount,
           poolVaultAuthority: poolVaultAuthPda,
           controllerProgram: controllerProgram.programId,
-          tokenProgram: TOKEN_PROGRAM_ID,
+          otokenTokenProgram: TOKEN_PROGRAM_ID,
+          collateralTokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([operator])
         .rpc();
@@ -806,13 +894,15 @@ describe("post-expiry instructions", () => {
             controllerConfig: controllerConfigPda,
             otokenInfo: otokenInfoPda,
             otokenMint: otokenMint,
+            collateralMintAccount: collateralMint,
             settlerOtokenAccount: settlerOtokenAccount,
             settlerCollateralAccount: settlerCollateralAccount,
             mmCollateralAccount: mmCollateralAccount,
             poolTokenAccount: poolTokenAccount,
             poolVaultAuthority: poolVaultAuthPda,
             controllerProgram: controllerProgram.programId,
-            tokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
           })
           .signers([maker])
           .rpc();

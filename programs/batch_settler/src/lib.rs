@@ -1,6 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar::instructions as ixs_sysvar;
-use anchor_spl::token::{self, Burn, Mint, Token, TokenAccount, Transfer};
+use anchor_spl::token_interface::{
+    self, BurnChecked, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 use controller::program::Controller as ControllerProgram;
 use solana_sdk_ids::ed25519_program;
 
@@ -286,10 +288,11 @@ pub mod batch_settler {
                 vault: ctx.accounts.vault.to_account_info(),
                 otoken_info: ctx.accounts.otoken_info.to_account_info(),
                 pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                collateral_mint_account: ctx.accounts.collateral_mint_account.to_account_info(),
                 beneficiary_token_account: ctx.accounts.beneficiary_token_account.to_account_info(),
                 pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                 admin: ctx.accounts.controller_admin.to_account_info(),
-                token_program: ctx.accounts.token_program.to_account_info(),
+                collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
             },
         ))?;
         emit!(VaultSettledEvent {
@@ -309,10 +312,10 @@ pub mod batch_settler {
         // Burn only this MM's custodied oTokens, not entire account
         let burn_amount = ctx.accounts.maker_otoken_balance.balance;
         if burn_amount > 0 {
-            token::burn(
+            token_interface::burn_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Burn {
+                    ctx.accounts.otoken_token_program.to_account_info(),
+                    BurnChecked {
                         mint: ctx.accounts.otoken_mint.to_account_info(),
                         from: ctx.accounts.settler_otoken_account.to_account_info(),
                         authority: ctx.accounts.settler_config.to_account_info(),
@@ -320,6 +323,7 @@ pub mod batch_settler {
                     signer_seeds,
                 ),
                 burn_amount,
+                ctx.accounts.otoken_mint.decimals,
             )?;
         }
 
@@ -334,10 +338,11 @@ pub mod batch_settler {
                 config: ctx.accounts.controller_config.to_account_info(),
                 vault: ctx.accounts.vault.to_account_info(),
                 pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                collateral_mint_account: ctx.accounts.collateral_mint_account.to_account_info(),
                 beneficiary_token_account: ctx.accounts.beneficiary_token_account.to_account_info(),
                 pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
-                token_program: ctx.accounts.token_program.to_account_info(),
+                collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
             },
             signer_seeds,
         ))?;
@@ -444,9 +449,11 @@ pub mod batch_settler {
                         .settler_collateral_account
                         .to_account_info(),
                     pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                    collateral_mint_account: ctx.accounts.collateral_mint_account.to_account_info(),
                     pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     redeemer: ctx.accounts.settler_config.to_account_info(),
-                    token_program: ctx.accounts.token_program.to_account_info(),
+                    otoken_token_program: ctx.accounts.otoken_token_program.to_account_info(),
+                    collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -462,17 +469,19 @@ pub mod batch_settler {
             .checked_sub(balance_before)
             .ok_or(SettlerError::MathOverflow)?;
         if payout > 0 {
-            token::transfer(
+            token_interface::transfer_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
+                    ctx.accounts.collateral_token_program.to_account_info(),
+                    TransferChecked {
                         from: ctx.accounts.settler_collateral_account.to_account_info(),
+                        mint: ctx.accounts.collateral_mint_account.to_account_info(),
                         to: ctx.accounts.mm_collateral_account.to_account_info(),
                         authority: ctx.accounts.settler_config.to_account_info(),
                     },
                     signer_seeds,
                 ),
                 payout,
+                ctx.accounts.collateral_mint_account.decimals,
             )?;
         }
 
@@ -540,9 +549,11 @@ pub mod batch_settler {
                         .settler_collateral_account
                         .to_account_info(),
                     pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                    collateral_mint_account: ctx.accounts.collateral_mint_account.to_account_info(),
                     pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     redeemer: ctx.accounts.settler_config.to_account_info(),
-                    token_program: ctx.accounts.token_program.to_account_info(),
+                    otoken_token_program: ctx.accounts.otoken_token_program.to_account_info(),
+                    collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -558,17 +569,19 @@ pub mod batch_settler {
             .checked_sub(balance_before)
             .ok_or(SettlerError::MathOverflow)?;
         if payout > 0 {
-            token::transfer(
+            token_interface::transfer_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
+                    ctx.accounts.collateral_token_program.to_account_info(),
+                    TransferChecked {
                         from: ctx.accounts.settler_collateral_account.to_account_info(),
+                        mint: ctx.accounts.collateral_mint_account.to_account_info(),
                         to: ctx.accounts.mm_collateral_account.to_account_info(),
                         authority: ctx.accounts.settler_config.to_account_info(),
                     },
                     signer_seeds,
                 ),
                 payout,
+                ctx.accounts.collateral_mint_account.decimals,
             )?;
         }
 
@@ -725,17 +738,19 @@ pub mod batch_settler {
                 .checked_sub(collateral_used)
                 .ok_or(SettlerError::MathOverflow)?;
             if surplus_collateral > 0 {
-                token::transfer(
+                token_interface::transfer_checked(
                     CpiContext::new_with_signer(
-                        ctx.accounts.token_program.to_account_info(),
-                        Transfer {
+                        ctx.accounts.collateral_token_program.to_account_info(),
+                        TransferChecked {
                             from: ctx.accounts.settler_collateral_account.to_account_info(),
+                            mint: ctx.accounts.collateral_mint_account.to_account_info(),
                             to: ctx.accounts.mm_collateral_account.to_account_info(),
                             authority: ctx.accounts.settler_config.to_account_info(),
                         },
                         signer_seeds,
                     ),
                     surplus_collateral,
+                    ctx.accounts.collateral_mint_account.decimals,
                 )?;
             }
         } else {
@@ -756,17 +771,19 @@ pub mod batch_settler {
             );
 
             // Pay the user exactly contra_amount.
-            token::transfer(
+            token_interface::transfer_checked(
                 CpiContext::new_with_signer(
-                    ctx.accounts.token_program.to_account_info(),
-                    Transfer {
+                    ctx.accounts.contra_token_program.to_account_info(),
+                    TransferChecked {
                         from: ctx.accounts.settler_contra_account.to_account_info(),
+                        mint: ctx.accounts.contra_mint.to_account_info(),
                         to: ctx.accounts.user_contra_account.to_account_info(),
                         authority: ctx.accounts.settler_config.to_account_info(),
                     },
                     signer_seeds,
                 ),
                 contra_amount,
+                ctx.accounts.contra_mint.decimals,
             )?;
 
             // Surplus contra (contra_mint) → MM.
@@ -774,17 +791,19 @@ pub mod batch_settler {
                 .checked_sub(contra_amount)
                 .ok_or(SettlerError::MathOverflow)?;
             if surplus_contra > 0 {
-                token::transfer(
+                token_interface::transfer_checked(
                     CpiContext::new_with_signer(
-                        ctx.accounts.token_program.to_account_info(),
-                        Transfer {
+                        ctx.accounts.contra_token_program.to_account_info(),
+                        TransferChecked {
                             from: ctx.accounts.settler_contra_account.to_account_info(),
+                            mint: ctx.accounts.contra_mint.to_account_info(),
                             to: ctx.accounts.mm_collateral_account.to_account_info(),
                             authority: ctx.accounts.settler_config.to_account_info(),
                         },
                         signer_seeds,
                     ),
                     surplus_contra,
+                    ctx.accounts.contra_mint.decimals,
                 )?;
             }
         }
@@ -901,7 +920,7 @@ pub struct WhitelistMaker<'info> {
         bump = settler_config.bump,
         has_one = owner,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
     #[account(
         init_if_needed,
         payer = owner,
@@ -1003,28 +1022,40 @@ pub struct ExecuteOrder<'info> {
     /// CHECK: Validated by controller CPI (mint_otoken)
     pub otoken_info: AccountInfo<'info>,
     #[account(mut)]
-    pub otoken_mint: Box<Account<'info, Mint>>,
+    pub otoken_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        constraint = collateral_mint_account.key()
+            == collateral_mint
+            @ SettlerError::InvalidCollateralMint,
+    )]
+    pub collateral_mint_account: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        constraint = premium_mint_account.key()
+            == premium_mint
+            @ SettlerError::InvalidPremiumMint,
+    )]
+    pub premium_mint_account: Box<InterfaceAccount<'info, Mint>>,
 
     /// User's collateral token account (delegated to settler PDA).
     #[account(mut)]
-    pub user_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub user_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// Controller pool receiving collateral
     #[account(mut)]
-    pub pool_token_account: Box<Account<'info, TokenAccount>>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: Controller pool vault authority PDA.
     pub pool_vault_authority: AccountInfo<'info>,
     /// Settler's oToken account (custody for MM, owned by settler PDA)
     #[account(mut)]
-    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
+    pub settler_otoken_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// MM's premium account (delegated to settler PDA, source of premium).
     #[account(mut)]
-    pub mm_premium_account: Box<Account<'info, TokenAccount>>,
+    pub mm_premium_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// User receives net premium here. Must belong to the signing user.
     #[account(mut)]
-    pub user_premium_account: Box<Account<'info, TokenAccount>>,
+    pub user_premium_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// Treasury receives protocol fee here
     #[account(mut)]
-    pub treasury_account: Box<Account<'info, TokenAccount>>,
+    pub treasury_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// MM oToken balance tracking
     #[account(
@@ -1056,7 +1087,9 @@ pub struct ExecuteOrder<'info> {
     /// CHECK: Ed25519 signature verified via instruction introspection
     pub maker: AccountInfo<'info>,
     pub controller_program: Program<'info, ControllerProgram>,
-    pub token_program: Program<'info, Token>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
+    pub premium_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
     /// CHECK: Instructions sysvar for ed25519 verification
     #[account(address = ixs_sysvar::ID)]
@@ -1082,17 +1115,18 @@ pub struct SettleVaultForMaker<'info> {
     /// CHECK: Validated by controller CPI
     pub otoken_info: AccountInfo<'info>,
     #[account(mut)]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub collateral_mint_account: InterfaceAccount<'info, Mint>,
     /// Beneficiary's token account (receives returned collateral)
     #[account(mut)]
-    pub beneficiary_token_account: Account<'info, TokenAccount>,
+    pub beneficiary_token_account: InterfaceAccount<'info, TokenAccount>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
     /// Controller admin must co-sign for settlement
     pub controller_admin: Signer<'info>,
 
     pub controller_program: Program<'info, ControllerProgram>,
-    pub token_program: Program<'info, Token>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -1101,7 +1135,7 @@ pub struct EmergencyWithdrawOrder<'info> {
         seeds = [b"settler_config"],
         bump = settler_config.bump,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
 
     /// Vault beneficiary triggers the emergency withdrawal
     #[account(
@@ -1118,12 +1152,13 @@ pub struct EmergencyWithdrawOrder<'info> {
         constraint = vault.owner == settler_config.key()
             @ SettlerError::Unauthorized,
     )]
-    pub vault: Account<'info, controller::Vault>,
+    pub vault: Box<Account<'info, controller::Vault>>,
     #[account(mut)]
-    pub pool_token_account: Account<'info, TokenAccount>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub collateral_mint_account: Box<InterfaceAccount<'info, Mint>>,
     /// Beneficiary's token account (receives collateral)
     #[account(mut)]
-    pub beneficiary_token_account: Account<'info, TokenAccount>,
+    pub beneficiary_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
@@ -1131,7 +1166,7 @@ pub struct EmergencyWithdrawOrder<'info> {
     pub maker: AccountInfo<'info>,
     /// oToken mint for burning
     #[account(mut)]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: Box<InterfaceAccount<'info, Mint>>,
     /// Settler's oToken custody account
     #[account(
         mut,
@@ -1142,7 +1177,7 @@ pub struct EmergencyWithdrawOrder<'info> {
             == otoken_mint.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Account<'info, TokenAccount>,
+    pub settler_otoken_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// MM balance to clear (validated via PDA seeds)
     #[account(
         mut,
@@ -1156,7 +1191,8 @@ pub struct EmergencyWithdrawOrder<'info> {
     pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
 
     pub controller_program: Program<'info, ControllerProgram>,
-    pub token_program: Program<'info, Token>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -1167,7 +1203,7 @@ pub struct OwnerAction<'info> {
         bump = settler_config.bump,
         has_one = owner,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
     pub owner: Signer<'info>,
 }
 
@@ -1191,13 +1227,14 @@ pub struct RedeemForMM<'info> {
         ],
         bump = maker_otoken_balance.bump,
     )]
-    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+    pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
 
     /// CHECK: Validated by controller CPI
     pub controller_config: AccountInfo<'info>,
     pub otoken_info: Box<Account<'info, controller::OTokenInfo>>,
     #[account(mut)]
-    pub otoken_mint: Box<Account<'info, Mint>>,
+    pub otoken_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub collateral_mint_account: Box<InterfaceAccount<'info, Mint>>,
     /// Settler's oToken custody (source of oTokens to burn)
     #[account(
         mut,
@@ -1206,7 +1243,7 @@ pub struct RedeemForMM<'info> {
         constraint = settler_otoken_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
+    pub settler_otoken_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// Settler's collateral account (receives redeem payout)
     #[account(
         mut,
@@ -1215,7 +1252,7 @@ pub struct RedeemForMM<'info> {
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub settler_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// MM's collateral account — must be owned by the maker and hold
     /// the option's collateral mint.
     #[account(
@@ -1226,14 +1263,15 @@ pub struct RedeemForMM<'info> {
             == maker_otoken_balance.maker
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub mm_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(mut)]
-    pub pool_token_account: Box<Account<'info, TokenAccount>>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
     pub controller_program: Program<'info, ControllerProgram>,
-    pub token_program: Program<'info, Token>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -1268,7 +1306,8 @@ pub struct MMSelfRedeem<'info> {
     pub controller_config: AccountInfo<'info>,
     pub otoken_info: Account<'info, controller::OTokenInfo>,
     #[account(mut)]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: InterfaceAccount<'info, Mint>,
+    pub collateral_mint_account: InterfaceAccount<'info, Mint>,
     #[account(
         mut,
         constraint = settler_otoken_account.mint == otoken_mint.key()
@@ -1276,7 +1315,7 @@ pub struct MMSelfRedeem<'info> {
         constraint = settler_otoken_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
+    pub settler_otoken_account: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(
         mut,
         constraint = settler_collateral_account.mint == otoken_info.collateral_mint
@@ -1284,7 +1323,7 @@ pub struct MMSelfRedeem<'info> {
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub settler_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// MM (self-redeem) destination — must be owned by the signing
     /// maker and hold the option's collateral mint.
     #[account(
@@ -1294,14 +1333,15 @@ pub struct MMSelfRedeem<'info> {
         constraint = mm_collateral_account.owner == maker.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub mm_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(mut)]
-    pub pool_token_account: Box<Account<'info, TokenAccount>>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
     pub controller_program: Program<'info, ControllerProgram>,
-    pub token_program: Program<'info, Token>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
 }
 
 #[derive(Accounts)]
@@ -1312,7 +1352,7 @@ pub struct PhysicalRedeem<'info> {
         constraint = operator.key() == settler_config.operator
             @ SettlerError::Unauthorized,
     )]
-    pub settler_config: Account<'info, SettlerConfig>,
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
     pub operator: Signer<'info>,
 
     #[account(
@@ -1324,13 +1364,14 @@ pub struct PhysicalRedeem<'info> {
         ],
         bump = maker_otoken_balance.bump,
     )]
-    pub maker_otoken_balance: Account<'info, MakerOTokenBalance>,
+    pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
 
     /// CHECK: Validated by controller CPI
     pub controller_config: AccountInfo<'info>,
-    pub otoken_info: Account<'info, controller::OTokenInfo>,
+    pub otoken_info: Box<Account<'info, controller::OTokenInfo>>,
     #[account(mut)]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub collateral_mint_account: Box<InterfaceAccount<'info, Mint>>,
     #[account(
         mut,
         constraint = settler_otoken_account.mint == otoken_mint.key()
@@ -1338,7 +1379,7 @@ pub struct PhysicalRedeem<'info> {
         constraint = settler_otoken_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_otoken_account: Box<Account<'info, TokenAccount>>,
+    pub settler_otoken_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// Settler's collateral token account (receives redeem payout)
     #[account(
         mut,
@@ -1347,11 +1388,11 @@ pub struct PhysicalRedeem<'info> {
         constraint = settler_collateral_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub settler_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// The contra-asset mint. For PUT this must equal
     /// otoken_info.underlying; for CALL it must equal
     /// otoken_info.strike_asset. Validated in the handler.
-    pub contra_mint: Box<Account<'info, Mint>>,
+    pub contra_mint: Box<InterfaceAccount<'info, Mint>>,
     /// Settler's contra-asset token account.
     ///
     /// CALL flow: receives the Jupiter swap output, then pays the
@@ -1366,7 +1407,7 @@ pub struct PhysicalRedeem<'info> {
         constraint = settler_contra_account.owner == settler_config.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub settler_contra_account: Box<Account<'info, TokenAccount>>,
+    pub settler_contra_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: User identity. user_contra_account is bound to this key,
     /// and vault.beneficiary must match it.
     pub user: AccountInfo<'info>,
@@ -1399,7 +1440,7 @@ pub struct PhysicalRedeem<'info> {
         constraint = user_contra_account.owner == user.key()
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub user_contra_account: Box<Account<'info, TokenAccount>>,
+    pub user_contra_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// MM receives surplus. Owner must be the maker the option was
     /// custodied for. Mint must match the surplus asset:
     ///   PUT  → otoken_info.collateral_mint
@@ -1412,9 +1453,9 @@ pub struct PhysicalRedeem<'info> {
             == maker_otoken_balance.maker
             @ SettlerError::InvalidCustodyAccount,
     )]
-    pub mm_collateral_account: Box<Account<'info, TokenAccount>>,
+    pub mm_collateral_account: Box<InterfaceAccount<'info, TokenAccount>>,
     #[account(mut)]
-    pub pool_token_account: Box<Account<'info, TokenAccount>>,
+    pub pool_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
     /// CHECK: Pool vault authority PDA
     pub pool_vault_authority: AccountInfo<'info>,
 
@@ -1422,7 +1463,9 @@ pub struct PhysicalRedeem<'info> {
     pub jupiter_program: AccountInfo<'info>,
 
     pub controller_program: Program<'info, ControllerProgram>,
-    pub token_program: Program<'info, Token>,
+    pub otoken_token_program: Interface<'info, TokenInterface>,
+    pub collateral_token_program: Interface<'info, TokenInterface>,
+    pub contra_token_program: Interface<'info, TokenInterface>,
     // remaining_accounts: Jupiter route accounts
 }
 
@@ -1554,6 +1597,10 @@ pub enum SettlerError {
     InvalidTreasury,
     #[msg("Invalid custody account")]
     InvalidCustodyAccount,
+    #[msg("Invalid collateral mint")]
+    InvalidCollateralMint,
+    #[msg("Invalid premium mint")]
+    InvalidPremiumMint,
     #[msg("Unauthorized")]
     Unauthorized,
     #[msg("Escape delay too short (min 3 days)")]
@@ -1757,10 +1804,11 @@ fn cpi_deposit_collateral(
                 config: ctx.accounts.controller_config.to_account_info(),
                 vault: ctx.accounts.vault.to_account_info(),
                 user_token_account: ctx.accounts.user_collateral_account.to_account_info(),
+                collateral_mint_account: ctx.accounts.collateral_mint_account.to_account_info(),
                 pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
                 pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
-                token_program: ctx.accounts.token_program.to_account_info(),
+                collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
             },
             signer_seeds,
         ),
@@ -1783,7 +1831,7 @@ fn cpi_mint_otoken(
                 otoken_mint: ctx.accounts.otoken_mint.to_account_info(),
                 destination: ctx.accounts.settler_otoken_account.to_account_info(),
                 owner: ctx.accounts.settler_config.to_account_info(),
-                token_program: ctx.accounts.token_program.to_account_info(),
+                otoken_token_program: ctx.accounts.otoken_token_program.to_account_info(),
             },
             signer_seeds,
         ),
@@ -1800,31 +1848,35 @@ fn transfer_premium(
     fee: u64,
 ) -> Result<()> {
     if net > 0 {
-        token::transfer(
+        token_interface::transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
+                ctx.accounts.premium_token_program.to_account_info(),
+                TransferChecked {
                     from: ctx.accounts.mm_premium_account.to_account_info(),
+                    mint: ctx.accounts.premium_mint_account.to_account_info(),
                     to: ctx.accounts.user_premium_account.to_account_info(),
                     authority: ctx.accounts.settler_config.to_account_info(),
                 },
                 signer_seeds,
             ),
             net,
+            ctx.accounts.premium_mint_account.decimals,
         )?;
     }
     if fee > 0 {
-        token::transfer(
+        token_interface::transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
+                ctx.accounts.premium_token_program.to_account_info(),
+                TransferChecked {
                     from: ctx.accounts.mm_premium_account.to_account_info(),
+                    mint: ctx.accounts.premium_mint_account.to_account_info(),
                     to: ctx.accounts.treasury_account.to_account_info(),
                     authority: ctx.accounts.settler_config.to_account_info(),
                 },
                 signer_seeds,
             ),
             fee,
+            ctx.accounts.premium_mint_account.decimals,
         )?;
     }
     Ok(())
@@ -1918,9 +1970,11 @@ fn cpi_redeem_otoken(
                     .settler_collateral_account
                     .to_account_info(),
                 pool_token_account: ctx.accounts.pool_token_account.to_account_info(),
+                collateral_mint_account: ctx.accounts.collateral_mint_account.to_account_info(),
                 pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                 redeemer: ctx.accounts.settler_config.to_account_info(),
-                token_program: ctx.accounts.token_program.to_account_info(),
+                otoken_token_program: ctx.accounts.otoken_token_program.to_account_info(),
+                collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
             },
             signer_seeds,
         ),

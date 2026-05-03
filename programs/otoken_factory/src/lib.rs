@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Mint, Token};
+use anchor_spl::token_interface::{Mint, TokenInterface};
 
 declare_id!("84hBdboukYWVg7DoBu5Z22vCgodG4B1PFSMXrBZAivZ1");
 
@@ -189,8 +189,9 @@ pub struct CreateOtoken<'info> {
         bump,
         mint::decimals = 8,
         mint::authority = controller_authority,
+        mint::token_program = token_program,
     )]
-    pub otoken_mint: Account<'info, Mint>,
+    pub otoken_mint: InterfaceAccount<'info, Mint>,
     /// CHECK: Validated against factory_config.controller.
     /// Controller's config PDA, set as the mint authority
     /// so the controller can mint oTokens directly.
@@ -202,7 +203,7 @@ pub struct CreateOtoken<'info> {
     pub controller_authority: AccountInfo<'info>,
     #[account(mut)]
     pub admin: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 

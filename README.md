@@ -6,7 +6,6 @@ Options protocol on Solana, mirroring the EVM contracts on Base (`blockchain/`).
 
 | Program | Description | PDA Seeds |
 |---------|-------------|-----------|
-| `address_book` | Central registry of program addresses | `[b"registry"]` |
 | `controller` | Vault lifecycle (open, deposit, mint, settle, redeem) | `[b"vault", owner, vault_id]`, `[b"vault_counter", owner]` |
 | `margin_pool` | Holds collateral in PDA-owned SPL token accounts | `[b"margin_pool", collateral_mint]` |
 | `otoken_factory` | Creates oToken SPL mints via PDA derivation | `[b"otoken", underlying, strike_asset, collateral, strike_price, expiry, is_put]` |
@@ -26,7 +25,7 @@ Options protocol on Solana, mirroring the EVM contracts on Base (`blockchain/`).
 
 **Oracle.** Pyth price feeds replace Chainlink. Pyth provides price + confidence interval. We enforce staleness and confidence deviation checks.
 
-**Physical settlement.** Flash loan from SPL token-lending + Jupiter swap replaces Aave flash loan + Uniswap swap. Same atomic pattern.
+**Physical settlement.** Direct collateral delivery plus Jupiter swap routing replaces the Base flash-loan path. The Solana version intentionally does not deploy a lending/flash-loan integration.
 
 ## Build
 
@@ -44,10 +43,9 @@ anchor test
 
 | Crate | Version | Programs | Notes |
 |-------|---------|----------|-------|
-| `anchor-lang` | 0.32.1 | All 7 | Core framework |
+| `anchor-lang` | 0.32.1 | All programs | Core framework |
 | `anchor-spl` | 0.32.1 | controller, margin_pool, otoken_factory, batch_settler | `default-features = false, features = ["token"]` to avoid token-2022 version conflict |
 | `pyth-solana-receiver-sdk` | 1.1.0 | oracle | Pyth pull oracle integration |
-| `spl-token-lending` | 0.2.0 | batch_settler | Flash loans for physical settlement |
 | `jupiter-cpi` | 4.0.3 | batch_settler | Jupiter swap CPI for physical settlement |
 
 **Note:** `anchor-spl` must use `default-features = false` with only the `token` feature. Enabling `token_2022` (on by default) creates a `solana-instruction` version conflict between `solana-zk-sdk =2.2.1` and `anchor-lang`'s `2.3.3`.
