@@ -139,76 +139,15 @@ async function createMockTokens(
 async function initWhitelist(
   program: Program<Whitelist>,
   admin: PublicKey,
-  tokens: MockTokens
+  factoryProgramId: PublicKey
 ) {
   console.log("\n=== Initializing Whitelist ===");
   await tryRpc("initialize", () =>
     program.methods.initialize(admin).accounts({ payer: admin }).rpc()
   );
-
-  const underlyings = [
-    { mint: NATIVE_SOL_MINT, name: "SOL" },
-    { mint: tokens.tslax, name: "TSLAx" },
-  ];
-  for (const u of underlyings) {
-    const sym = Array.from(Buffer.from(u.name.padEnd(8, "\0")));
-    await tryRpc(`underlying(${u.name})`, () =>
-      program.methods.whitelistUnderlying(u.mint, sym).accounts({ admin }).rpc()
-    );
-  }
-
-  // USDC as collateral (SOL/JUP/XAU already registered as underlying)
-  const usdcSym = Array.from(Buffer.from("USDC\0\0\0\0"));
-  await tryRpc("collateral(USDC)", () =>
-    program.methods
-      .whitelistCollateral(tokens.usdc, usdcSym)
-      .accounts({ admin })
-      .rpc()
+  await tryRpc("setFactory", () =>
+    program.methods.setFactory(factoryProgramId).accounts({ admin }).rpc()
   );
-
-  const products = [
-    {
-      underlying: NATIVE_SOL_MINT,
-      collateral: tokens.usdc,
-      isPut: true,
-      name: "SOL-put",
-    },
-    {
-      underlying: NATIVE_SOL_MINT,
-      collateral: NATIVE_SOL_MINT,
-      isPut: false,
-      name: "SOL-call",
-    },
-    {
-      underlying: tokens.tslax,
-      collateral: tokens.usdc,
-      isPut: true,
-      name: "TSLAx-put",
-    },
-    {
-      underlying: tokens.tslax,
-      collateral: tokens.tslax,
-      isPut: false,
-      name: "TSLAx-call",
-    },
-  ];
-  for (const p of products) {
-    const productPda = findPda(
-      [
-        Buffer.from("product"),
-        p.underlying.toBuffer(),
-        p.collateral.toBuffer(),
-        Buffer.from([p.isPut ? 1 : 0]),
-      ],
-      program.programId
-    );
-    await tryRpc(`product(${p.name})`, () =>
-      program.methods
-        .whitelistProduct(p.underlying, tokens.usdc, p.collateral, p.isPut)
-        .accounts({ product: productPda, admin })
-        .rpc()
-    );
-  }
 }
 
 async function initOracle(
@@ -445,7 +384,11 @@ async function main() {
     admin.publicKey
   );
 
-  await initWhitelist(programs.whitelist, admin.publicKey, tokens);
+  await initWhitelist(
+    programs.whitelist,
+    admin.publicKey,
+    programs.otokenFactory.programId
+  );
   await initOracle(programs.oracle, admin.publicKey, tokens);
   await initController(programs.controller, admin.publicKey);
   await initMarginPool(
