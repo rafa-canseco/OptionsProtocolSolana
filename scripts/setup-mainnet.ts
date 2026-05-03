@@ -8,12 +8,19 @@
  *
  * Example:
  *   MAINNET_CONFIRM=I_UNDERSTAND_MAINNET \
+ *   MAINNET_SEED_NONCE=<random-secret-string> \
  *   ANCHOR_PROVIDER_URL=https://api.mainnet-beta.solana.com \
  *   ANCHOR_WALLET=usb://ledger \
  *   OPERATOR_PUBKEY=<hot-wallet> \
  *   TREASURY_PUBKEY=<treasury> \
  *   MM_PUBKEY=<mm-hot-wallet> \
  *   npx ts-node scripts/setup-mainnet.ts
+ *
+ * MAINNET_SEED_NONCE: a private string mixed into the deterministic
+ * keypairs used for vault token accounts. Keep it secret and reuse the
+ * same value on re-runs so the script stays idempotent. Without it,
+ * the keypairs would be derivable from the public repo and an attacker
+ * could front-run the deploy by initializing the same accounts first.
  */
 // @ts-nocheck
 import * as anchor from "@coral-xyz/anchor";
@@ -115,7 +122,13 @@ async function tryRpc(label: string, fn: () => Promise<unknown>) {
 async function createVaultAccount(connection, payer, program, mintCfg, label: string) {
   const poolVault = findPda([Buffer.from("pool_vault"), mintCfg.mint.toBuffer()], program.programId);
   const vaultAuth = findPda([Buffer.from("lending_vault_auth"), mintCfg.mint.toBuffer()], program.programId);
-  const tokenKp = keypairFromSeed(`b1nary-mainnet-vault-${label.toLowerCase()}-v1`);
+  // Seed nonce comes from env so the keypair can't be pre-computed from the
+  // public repo. Idempotent across re-runs as long as the same nonce is used.
+  const seedNonce = process.env.MAINNET_SEED_NONCE;
+  if (!seedNonce) {
+    throw new Error("MAINNET_SEED_NONCE env var is required (use the same value across re-runs to keep idempotence)");
+  }
+  const tokenKp = keypairFromSeed(`${seedNonce}:b1nary-mainnet-vault-${label.toLowerCase()}-v1`);
   let tokenAccount = tokenKp.publicKey;
 
   try {

@@ -87,6 +87,14 @@ pub mod controller {
             ControllerError::CollateralMismatch
         );
 
+        // Snapshot the pool balance and verify the post-transfer delta equals
+        // `amount`. This rejects Token-2022 mints with `TransferFeeConfig`
+        // (or any other extension that causes a credit shortfall): if the
+        // pool received less than `amount`, `vault.collateral_amount` would
+        // overstate the on-chain balance and downstream payouts would
+        // eventually exceed what the pool actually holds.
+        let balance_before = ctx.accounts.pool_token_account.amount;
+
         token_interface::transfer_checked(
             CpiContext::new(
                 ctx.accounts.collateral_token_program.to_account_info(),
@@ -100,6 +108,18 @@ pub mod controller {
             amount,
             ctx.accounts.collateral_mint_account.decimals,
         )?;
+
+        ctx.accounts.pool_token_account.reload()?;
+        let actual_received = ctx
+            .accounts
+            .pool_token_account
+            .amount
+            .checked_sub(balance_before)
+            .ok_or(ControllerError::MathOverflow)?;
+        require!(
+            actual_received == amount,
+            ControllerError::CollateralCreditMismatch
+        );
 
         vault.collateral_amount = vault
             .collateral_amount
@@ -1131,4 +1151,6 @@ pub enum ControllerError {
     NotFullyPaused,
     #[msg("OToken not whitelisted")]
     OTokenNotWhitelisted,
+    #[msg("Pool credit did not match deposit amount (fee-bearing mint?)")]
+    CollateralCreditMismatch,
 }
