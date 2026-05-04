@@ -3325,6 +3325,131 @@ describe("b1nary-options", () => {
           );
         }
       });
+
+      // NM-PR23-001 regression: execute_order must reject any
+      // amount below MIN_EXECUTE_AMOUNT (1_000_000 raw oToken units,
+      // = 0.01 oTokens at 8 decimals — matches TSLAx min). Without
+      // this floor, anyone holding a valid maker signature could
+      // spam amount=1 fills to drain the sponsored rent_reserve.
+      it("rejects order with amount below MIN_EXECUTE_AMOUNT (NM-PR23-001)", async () => {
+        const tinyAmount = new BN(999_999);
+
+        const makerStateData =
+          await batchSettlerProgram.account.makerState.fetch(
+            findMakerStatePda(
+              maker.publicKey,
+              batchSettlerProgram.programId
+            )[0]
+          );
+        const currentNonce = makerStateData.nonce;
+        const newQuoteId = new BN(401);
+
+        const message = buildQuoteMessage(
+          otokenMint,
+          premiumMint,
+          bidPrice,
+          deadline,
+          newQuoteId,
+          maxAmount,
+          currentNonce
+        );
+        const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: maker.secretKey,
+          message,
+        });
+
+        const [quoteFillPda] = findQuoteFillPda(
+          maker.publicKey,
+          newQuoteId,
+          currentNonce,
+          batchSettlerProgram.programId
+        );
+        const [makerStatePda] = findMakerStatePda(
+          maker.publicKey,
+          batchSettlerProgram.programId
+        );
+        const [newVaultPda] = findVaultPda(
+          settlerConfigPda,
+          new BN(1),
+          controllerProgram.programId
+        );
+        const [newMmBalPda] = findMakerOTokenBalancePda(
+          maker.publicKey,
+          otokenMint,
+          batchSettlerProgram.programId
+        );
+
+        const ix = await batchSettlerProgram.methods
+          .executeOrder(
+            tinyAmount,
+            bidPrice,
+            deadline,
+            newQuoteId,
+            maxAmount,
+            currentNonce,
+            premiumMint,
+            collateralAmount,
+            collateralMint
+          )
+          .accounts({
+            settlerConfig: settlerConfigPda,
+            rentReserve: rentReservePda,
+            makerState: makerStatePda,
+            quoteFill: quoteFillPda,
+            controllerConfig: controllerConfigPda,
+            vault: newVaultPda,
+            vaultCounter: vaultCounterForSettler,
+            otokenInfo: otokenInfoPda,
+            otokenMint: otokenMint,
+            collateralMintAccount: collateralMint,
+            premiumMintAccount: premiumMint,
+            userCollateralAccount: userCollateralAccount,
+            poolTokenAccount: poolTokenAccount,
+            poolVaultAuthority: poolVaultAuthPda,
+            settlerOtokenAccount: settlerOtokenAccount,
+            mmPremiumAccount: mmPremiumAccount,
+            userPremiumAccount: userPremiumAccount,
+            treasuryAccount: treasuryPremiumAccount,
+            makerOtokenBalance: newMmBalPda,
+            vaultMm: findVaultMMPda(
+              newVaultPda,
+              batchSettlerProgram.programId
+            )[0],
+            user: user.publicKey,
+            maker: maker.publicKey,
+            controllerProgram: controllerProgram.programId,
+            collateralTokenProgram: TOKEN_PROGRAM_ID,
+            otokenTokenProgram: TOKEN_PROGRAM_ID,
+            premiumTokenProgram: TOKEN_PROGRAM_ID,
+            systemProgram: SystemProgram.programId,
+            instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+          })
+          .instruction();
+
+        const { blockhash } = await connection.getLatestBlockhash();
+        const msgV0 = compileExecuteOrderMessage(
+          user.publicKey,
+          blockhash,
+          [ed25519Ix, ix]
+        );
+        const vtx = new VersionedTransaction(msgV0);
+        vtx.sign([user]);
+
+        try {
+          await connection.sendRawTransaction(vtx.serialize());
+          assert.fail("should reject amount below MIN_EXECUTE_AMOUNT");
+        } catch (err: any) {
+          if (err.message === "should reject amount below MIN_EXECUTE_AMOUNT") {
+            throw err;
+          }
+          const logs = (err.logs || []).join("\n");
+          assert.ok(
+            logs.includes("AmountTooSmall") ||
+              err.message.includes("AmountTooSmall"),
+            `expected AmountTooSmall, got: ${err.message}\n${logs}`
+          );
+        }
+      });
     });
   });
 });

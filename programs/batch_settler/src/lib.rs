@@ -12,6 +12,10 @@ declare_id!("GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS");
 const MAX_FEE_BPS: u16 = 2000;
 const PRICE_SCALE: u128 = 100_000_000; // 10^8
 const MIN_ESCAPE_DELAY: i64 = 259_200; // 3 days in seconds
+// Floor matches TSLAx (0.01) at 8-decimal oTokens — the smallest legitimate
+// minimum among Solana-listed assets. Blocks amount=1 spam against the
+// sponsored rent_reserve while leaving every product-side minimum untouched.
+const MIN_EXECUTE_AMOUNT: u64 = 1_000_000;
 const SETTLER_CONFIG_SPACE: usize = 8 + 32 + 32 + 32 + 2 + 1 + 8 + 32 + 1;
 const QUOTE_FILL_SPACE: usize = 8 + 8 + 1 + 1;
 const MAKER_OTOKEN_BALANCE_SPACE: usize = 8 + 32 + 32 + 8 + 1;
@@ -142,6 +146,7 @@ pub mod batch_settler {
         collateral_mint: Pubkey,
     ) -> Result<()> {
         require!(amount > 0, SettlerError::ZeroAmount);
+        require!(amount >= MIN_EXECUTE_AMOUNT, SettlerError::AmountTooSmall);
         require!(bid_price > 0, SettlerError::ZeroAmount);
         require!(!ctx.accounts.settler_config.paused, SettlerError::Paused);
         require_keys_eq!(
@@ -1730,6 +1735,8 @@ pub enum SettlerError {
     ExcessCollateralUsed,
     #[msg("Insufficient sponsored rent reserve")]
     InsufficientRentReserve,
+    #[msg("Amount below the minimum execute_order size")]
+    AmountTooSmall,
 }
 
 // ============================================================
@@ -1809,7 +1816,7 @@ fn read_anchor_account<T: AccountDeserialize>(account: &AccountInfo) -> Result<T
     require_keys_eq!(*account.owner, crate::ID, SettlerError::Unauthorized);
     let data = account.try_borrow_data()?;
     let mut src: &[u8] = &data;
-    T::try_deserialize(&mut src).map_err(Into::into)
+    T::try_deserialize(&mut src)
 }
 
 fn load_or_init_quote_fill(
