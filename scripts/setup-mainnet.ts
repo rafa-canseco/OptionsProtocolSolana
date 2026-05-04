@@ -94,6 +94,9 @@ const MAX_ORACLE_STALENESS = new BN(3600);
 const MAX_CONFIDENCE_BPS = 200;
 const PRICE_DEVIATION_BPS = 1000;
 const MAX_MM_USDC_DELEGATION = BigInt("18446744073709551615");
+const SETTLER_RENT_RESERVE_SOL = Number(
+  process.env.SETTLER_RENT_RESERVE_SOL ?? "1"
+);
 const JUPITER_QUOTE_API =
   process.env.JUPITER_QUOTE_API ?? "https://api.jup.ag/swap/v1/quote";
 const LEDGER_DEFAULT_PATH = "44'/501'/0'/0'";
@@ -228,6 +231,39 @@ async function createVaultAccount(
 async function providerSend(connection, wallet, tx: Transaction, signers = []) {
   const provider = anchor.getProvider() as anchor.AnchorProvider;
   return provider.sendAndConfirm(tx, signers);
+}
+
+async function ensureSolBalance(
+  connection: Connection,
+  payer: PublicKey,
+  target: PublicKey,
+  minSol: number,
+  label: string
+) {
+  const minLamports = Math.ceil(minSol * LAMPORTS_PER_SOL);
+  const balance = await connection.getBalance(target);
+  if (balance >= minLamports) {
+    console.log(
+      `  ${label}: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL (ok)`
+    );
+    return;
+  }
+
+  const topUp = minLamports - balance;
+  await providerSend(
+    connection,
+    anchor.getProvider().wallet,
+    new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer,
+        toPubkey: target,
+        lamports: topUp,
+      })
+    )
+  );
+  console.log(
+    `  ${label}: topped up ${(topUp / LAMPORTS_PER_SOL).toFixed(4)} SOL`
+  );
 }
 
 function controllerPoolVaultAuth(
@@ -497,6 +533,10 @@ async function main() {
       [Buffer.from("settler_config")],
       programs.batchSettler.programId
     ),
+    rentReserve: findPda(
+      [Buffer.from("rent_reserve")],
+      programs.batchSettler.programId
+    ),
   };
 
   if (!approvalsOnly) {
@@ -720,6 +760,13 @@ async function main() {
     } else {
       console.log("  settler.initialize: already done");
     }
+    await ensureSolBalance(
+      connection,
+      admin,
+      pdas.rentReserve,
+      SETTLER_RENT_RESERVE_SOL,
+      "settler rent reserve"
+    );
     const makerState = findPda(
       [Buffer.from("maker"), mm.toBuffer()],
       programs.batchSettler.programId
