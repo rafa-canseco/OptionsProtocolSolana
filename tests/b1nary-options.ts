@@ -112,6 +112,15 @@ function findFactoryConfigPda(
   );
 }
 
+function findFactoryOperatorConfigPda(
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("factory_operator_config")],
+    programId
+  );
+}
+
 function findOTokenPda(
   underlying: PublicKey,
   strikeAsset: PublicKey,
@@ -618,7 +627,7 @@ describe("b1nary-options", () => {
     let ownerOtokenAccount: PublicKey;
 
     // Helper: whitelist an oToken so controller accepts it
-    async function whitelistOToken(mint: PublicKey) {
+    async function whitelistOToken(mint: PublicKey, factoryOtoken: PublicKey) {
       const [wlPda] = findWhitelistedOTokenPda(
         mint, whitelistProgram.programId
       );
@@ -627,6 +636,9 @@ describe("b1nary-options", () => {
         .accounts({
           whitelistedOtoken: wlPda,
           config: whitelistConfigPda,
+          factoryOtoken,
+          factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+          factoryProgram: otokenFactoryProgram.programId,
           caller: admin.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -672,6 +684,7 @@ describe("b1nary-options", () => {
         )
         .accounts({
           factoryConfig: factoryConfigPda,
+          operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
           otoken: factoryOtokenPda,
           otokenMint: factoryOtokenMintPda,
           controllerAuthority: configPda,
@@ -681,7 +694,7 @@ describe("b1nary-options", () => {
         })
         .rpc();
 
-      const wlPda = await whitelistOToken(factoryOtokenMintPda);
+      const wlPda = await whitelistOToken(factoryOtokenMintPda, factoryOtokenPda);
       const [infoPda] = findOTokenInfoPda(
         factoryOtokenMintPda,
         controllerProgram.programId
@@ -698,6 +711,7 @@ describe("b1nary-options", () => {
           whitelistedOtoken: wlPda,
           whitelistProgram: whitelistProgram.programId,
           factoryProgram: otokenFactoryProgram.programId,
+          factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
           admin: admin.publicKey,
           systemProgram: SystemProgram.programId,
         })
@@ -764,6 +778,15 @@ describe("b1nary-options", () => {
         .setController(configPda)
         .accounts({
           admin: admin.publicKey,
+        })
+        .rpc();
+      await otokenFactoryProgram.methods
+        .setOperator(admin.publicKey)
+        .accounts({
+          factoryConfig: factoryConfigPda,
+          operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+          admin: admin.publicKey,
+          systemProgram: SystemProgram.programId,
         })
         .rpc();
     });
@@ -1046,6 +1069,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: factoryConfigPda,
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: expiredOtokenPda,
             otokenMint: expiredMintPda,
             controllerAuthority: configPda,
@@ -1421,6 +1445,9 @@ describe("b1nary-options", () => {
     const [controllerConfigPda] = findControllerConfigPda(
       controllerProgram.programId
     );
+    const [whitelistConfigPda] = findWhitelistConfigPda(
+      whitelistProgram.programId
+    );
 
     const underlying = Keypair.generate().publicKey;
     const strikeAsset = Keypair.generate().publicKey;
@@ -1462,6 +1489,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: factoryConfigPda,
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: otokenPda,
             otokenMint: otokenMintPda,
             controllerAuthority: controllerConfigPda,
@@ -1492,6 +1520,119 @@ describe("b1nary-options", () => {
         config.controller.equals(controllerConfigPda),
         "controller set"
       );
+    });
+
+    it("allows a non-admin operator to create, whitelist, and register an oToken", async () => {
+      const operator = Keypair.generate();
+      await fundAccount(provider, operator.publicKey, LAMPORTS_PER_SOL);
+
+      await otokenFactoryProgram.methods
+        .setOperator(operator.publicKey)
+        .accounts({
+          factoryConfig: factoryConfigPda,
+          operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+          admin: admin.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc();
+
+      const operatorUnderlying = Keypair.generate().publicKey;
+      const operatorStrikeAsset = Keypair.generate().publicKey;
+      const operatorCollateral = await createMint(
+        connection,
+        admin.payer,
+        admin.publicKey,
+        null,
+        6
+      );
+      const operatorStrikePrice = new BN("210000000000");
+      const operatorExpiry = new BN(FAR_FUTURE_EXPIRY.toNumber() + 12345);
+      const [operatorOtokenPda] = findOTokenPda(
+        operatorUnderlying,
+        operatorStrikeAsset,
+        operatorCollateral,
+        operatorStrikePrice,
+        operatorExpiry,
+        true,
+        otokenFactoryProgram.programId
+      );
+      const [operatorOtokenMintPda] = findOTokenMintPda(
+        operatorUnderlying,
+        operatorStrikeAsset,
+        operatorCollateral,
+        operatorStrikePrice,
+        operatorExpiry,
+        true,
+        otokenFactoryProgram.programId
+      );
+
+      await otokenFactoryProgram.methods
+        .createOtoken(
+          operatorUnderlying,
+          operatorStrikeAsset,
+          operatorCollateral,
+          operatorStrikePrice,
+          operatorExpiry,
+          true
+        )
+        .accounts({
+          factoryConfig: factoryConfigPda,
+          operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+          otoken: operatorOtokenPda,
+          otokenMint: operatorOtokenMintPda,
+          controllerAuthority: controllerConfigPda,
+          admin: operator.publicKey,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([operator])
+        .rpc();
+
+      const [wlOtokenPda] = findWhitelistedOTokenPda(
+        operatorOtokenMintPda,
+        whitelistProgram.programId
+      );
+      await whitelistProgram.methods
+        .whitelistOtoken(operatorOtokenMintPda)
+        .accounts({
+          whitelistedOtoken: wlOtokenPda,
+          config: whitelistConfigPda,
+          factoryOtoken: operatorOtokenPda,
+          factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+          factoryProgram: otokenFactoryProgram.programId,
+          caller: operator.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([operator])
+        .rpc();
+
+      const [operatorOtokenInfoPda] = findOTokenInfoPda(
+        operatorOtokenMintPda,
+        controllerProgram.programId
+      );
+      await controllerProgram.methods
+        .createOtokenInfo()
+        .accounts({
+          config: controllerConfigPda,
+          otokenInfo: operatorOtokenInfoPda,
+          otokenMint: operatorOtokenMintPda,
+          factoryOtoken: operatorOtokenPda,
+          collateralMintAccount: operatorCollateral,
+          whitelistedOtoken: wlOtokenPda,
+          whitelistProgram: whitelistProgram.programId,
+          factoryProgram: otokenFactoryProgram.programId,
+          factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+          admin: operator.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([operator])
+        .rpc();
+
+      const info = await controllerProgram.account.oTokenInfo.fetch(
+        operatorOtokenInfoPda
+      );
+      assert.ok(info.otokenMint.equals(operatorOtokenMintPda));
+      assert.ok(info.collateralMint.equals(operatorCollateral));
     });
 
     it("rejects set_controller from non-admin", async () => {
@@ -1542,6 +1683,7 @@ describe("b1nary-options", () => {
         )
         .accounts({
           factoryConfig: factoryConfigPda,
+          operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
           otoken: otokenPda,
           otokenMint: otokenMintPda,
           controllerAuthority: controllerConfigPda,
@@ -1604,6 +1746,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: factoryConfigPda,
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: otokenPda,
             otokenMint: otokenMintPda,
             controllerAuthority: controllerConfigPda,
@@ -1647,6 +1790,7 @@ describe("b1nary-options", () => {
         )
         .accounts({
           factoryConfig: factoryConfigPda,
+          operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
           otoken: otokenPda2,
           otokenMint: otokenMintPda2,
           controllerAuthority: controllerConfigPda,
@@ -1702,6 +1846,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: factoryConfigPda,
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: otokenPda,
             otokenMint: otokenMintPda,
             controllerAuthority: controllerConfigPda,
@@ -1715,7 +1860,7 @@ describe("b1nary-options", () => {
       } catch (err: any) {
         assert.include(
           err.toString(),
-          "AnchorError caused by account: factory_config"
+          "Unauthorized"
         );
       }
     });
@@ -1743,6 +1888,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: factoryConfigPda,
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: otokenPda,
             otokenMint: otokenMintPda,
             controllerAuthority: controllerConfigPda,
@@ -1783,6 +1929,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: factoryConfigPda,
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: otokenPda,
             otokenMint: otokenMintPda,
             controllerAuthority: wrongAuthority,
@@ -2190,6 +2337,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             factoryConfig: findFactoryConfigPda(otokenFactoryProgram.programId)[0],
+            operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             otoken: factoryOtokenPda,
             otokenMint: factoryOtokenMintPda,
             controllerAuthority: controllerConfigPda,
@@ -2216,6 +2364,9 @@ describe("b1nary-options", () => {
           .accounts({
             whitelistedOtoken: wlOtokenPda,
             config: wlConfigPda,
+            factoryOtoken: factoryOtokenPda,
+            factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
+            factoryProgram: otokenFactoryProgram.programId,
             caller: admin.publicKey,
             systemProgram: SystemProgram.programId,
           })
@@ -2232,6 +2383,7 @@ describe("b1nary-options", () => {
             whitelistedOtoken: wlOtokenPda,
             whitelistProgram: whitelistProgram.programId,
             factoryProgram: otokenFactoryProgram.programId,
+            factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId)[0],
             admin: admin.publicKey,
             systemProgram: SystemProgram.programId,
           })

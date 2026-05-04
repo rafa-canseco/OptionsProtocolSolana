@@ -427,6 +427,16 @@ pub mod controller {
     }
 
     pub fn create_otoken_info(ctx: Context<CreateOTokenInfo>) -> Result<()> {
+        let signer = ctx.accounts.admin.key();
+        let operator_authorized = is_factory_operator(
+            &ctx.accounts.factory_operator_config,
+            &ctx.accounts.factory_program.key(),
+            signer,
+        );
+        require!(
+            signer == ctx.accounts.config.admin || operator_authorized,
+            ControllerError::Unauthorized
+        );
         let factory_otoken = &ctx.accounts.factory_otoken;
         let collateral_decimals = ctx.accounts.collateral_mint_account.decimals;
         require!(
@@ -467,6 +477,20 @@ pub mod controller {
         ctx.accounts.otoken_info.expiry_price = price;
         Ok(())
     }
+}
+
+fn is_factory_operator(
+    account_info: &AccountInfo,
+    factory_program_id: &Pubkey,
+    signer: Pubkey,
+) -> bool {
+    if account_info.owner != factory_program_id {
+        return false;
+    }
+    let mut data: &[u8] = &account_info.data.borrow();
+    otoken_factory::FactoryOperatorConfig::try_deserialize(&mut data)
+        .map(|operator_config| signer == operator_config.operator)
+        .unwrap_or(false)
 }
 
 /// Collateral metadata for an oToken series.
@@ -881,7 +905,6 @@ pub struct CreateOTokenInfo<'info> {
     #[account(
         seeds = [b"controller_config"],
         bump = config.bump,
-        has_one = admin,
     )]
     pub config: Account<'info, ControllerConfig>,
     #[account(
@@ -930,6 +953,14 @@ pub struct CreateOTokenInfo<'info> {
     pub whitelisted_otoken: Account<'info, whitelist::WhitelistedOToken>,
     pub whitelist_program: Program<'info, whitelist::program::Whitelist>,
     pub factory_program: Program<'info, otoken_factory::program::OtokenFactory>,
+    /// CHECK: Optional factory operator config. If initialized, it authorizes
+    /// the factory operator to register oToken metadata.
+    #[account(
+        seeds = [b"factory_operator_config"],
+        bump,
+        seeds::program = factory_program.key(),
+    )]
+    pub factory_operator_config: AccountInfo<'info>,
     #[account(mut)]
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,

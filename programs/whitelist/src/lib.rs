@@ -25,10 +25,16 @@ pub mod whitelist {
     /// Register an oToken as whitelisted. Callable by admin or factory.
     pub fn whitelist_otoken(ctx: Context<WhitelistOToken>, otoken_mint: Pubkey) -> Result<()> {
         let config = &ctx.accounts.config;
+        let caller = ctx.accounts.caller.key();
+        let operator_authorized = is_factory_operator(
+            &ctx.accounts.factory_operator_config,
+            &ctx.accounts.factory_program.key(),
+            caller,
+        );
         require!(
-            ctx.accounts.caller.key() == config.admin
-                || (config.factory != Pubkey::default()
-                    && ctx.accounts.caller.key() == config.factory),
+            caller == config.admin
+                || (config.factory != Pubkey::default() && caller == config.factory)
+                || operator_authorized,
             WhitelistError::Unauthorized
         );
 
@@ -39,6 +45,20 @@ pub mod whitelist {
         emit!(OTokenWhitelisted { otoken_mint });
         Ok(())
     }
+}
+
+fn is_factory_operator(
+    account_info: &AccountInfo,
+    factory_program_id: &Pubkey,
+    caller: Pubkey,
+) -> bool {
+    if account_info.owner != factory_program_id {
+        return false;
+    }
+    let mut data: &[u8] = &account_info.data.borrow();
+    otoken_factory::FactoryOperatorConfig::try_deserialize(&mut data)
+        .map(|operator_config| caller == operator_config.operator)
+        .unwrap_or(false)
 }
 
 // ============================================================
@@ -108,6 +128,20 @@ pub struct WhitelistOToken<'info> {
         bump = config.bump,
     )]
     pub config: Account<'info, WhitelistConfig>,
+    #[account(
+        constraint = factory_otoken.mint == otoken_mint
+            @ WhitelistError::OtokenMismatch,
+    )]
+    pub factory_otoken: Account<'info, otoken_factory::OToken>,
+    /// CHECK: Optional factory operator config. If initialized, it authorizes
+    /// the factory operator to whitelist oTokens created by the factory.
+    #[account(
+        seeds = [b"factory_operator_config"],
+        bump,
+        seeds::program = factory_program.key(),
+    )]
+    pub factory_operator_config: AccountInfo<'info>,
+    pub factory_program: Program<'info, otoken_factory::program::OtokenFactory>,
     #[account(mut)]
     pub caller: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -132,4 +166,6 @@ pub enum WhitelistError {
     ZeroAddress,
     #[msg("Unauthorized")]
     Unauthorized,
+    #[msg("oToken factory metadata does not match mint")]
+    OtokenMismatch,
 }

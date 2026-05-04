@@ -114,6 +114,10 @@ function findFactoryConfigPda(programId: PublicKey): PublicKey {
   return findPda([Buffer.from("factory_config")], programId);
 }
 
+function findFactoryOperatorConfigPda(programId: PublicKey): PublicKey {
+  return findPda([Buffer.from("factory_operator_config")], programId);
+}
+
 function findFactoryOTokenPda(
   underlying: PublicKey,
   strikeAsset: PublicKey,
@@ -318,6 +322,16 @@ describe("post-expiry instructions", () => {
       .accounts({ admin: admin.publicKey })
       .signers([admin])
       .rpc();
+    await otokenFactoryProgram.methods
+      .setOperator(admin.publicKey)
+      .accounts({
+        factoryConfig: factoryConfigPda,
+        operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
+        admin: admin.publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([admin])
+      .rpc();
 
     // 3. Create canonical oToken + OTokenInfo with near-future expiry
     const clock = await context.banksClient.getClock();
@@ -353,6 +367,7 @@ describe("post-expiry instructions", () => {
       )
       .accounts({
         factoryConfig: factoryConfigPda,
+        operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
         otoken: factoryOtokenPda,
         otokenMint,
         controllerAuthority: controllerConfigPda,
@@ -369,6 +384,9 @@ describe("post-expiry instructions", () => {
       .accounts({
         whitelistedOtoken: wlOtokenPda,
         config: whitelistConfigPda,
+        factoryOtoken: factoryOtokenPda,
+        factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
+        factoryProgram: otokenFactoryProgram.programId,
         caller: admin.publicKey,
         systemProgram: SystemProgram.programId,
       })
@@ -396,6 +414,7 @@ describe("post-expiry instructions", () => {
         whitelistedOtoken: wlOtokenPda,
         whitelistProgram: whitelistProgram.programId,
         factoryProgram: otokenFactoryProgram.programId,
+        factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
         admin: admin.publicKey,
         systemProgram: SystemProgram.programId,
       })
