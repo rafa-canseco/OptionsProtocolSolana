@@ -49,6 +49,9 @@ const PROTOCOL_FEE_BPS = 400;
 const MAX_ORACLE_STALENESS = new BN(3600);
 const MAX_CONFIDENCE_BPS = 200;
 const PRICE_DEVIATION_BPS = 1000;
+const SETTLER_RENT_RESERVE_SOL = Number(
+  process.env.SETTLER_RENT_RESERVE_SOL ?? "0.5"
+);
 
 // ── Helpers ───────────────────────────────────────────────
 
@@ -88,6 +91,38 @@ function hexToBytes(hex: string): number[] {
 
 function findPda(seeds: Buffer[], programId: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(seeds, programId)[0];
+}
+
+async function ensureSolBalance(
+  connection: anchor.web3.Connection,
+  payer: PublicKey,
+  target: PublicKey,
+  minSol: number,
+  label: string
+) {
+  const minLamports = Math.ceil(minSol * LAMPORTS_PER_SOL);
+  const balance = await connection.getBalance(target);
+  if (balance >= minLamports) {
+    console.log(
+      `  ${label}: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL (ok)`
+    );
+    return;
+  }
+
+  const topUp = minLamports - balance;
+  const provider = anchor.getProvider() as anchor.AnchorProvider;
+  await provider.sendAndConfirm(
+    new anchor.web3.Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer,
+        toPubkey: target,
+        lamports: topUp,
+      })
+    )
+  );
+  console.log(
+    `  ${label}: topped up ${(topUp / LAMPORTS_PER_SOL).toFixed(4)} SOL`
+  );
 }
 
 // ── Step functions ────────────────────────────────────────
@@ -317,6 +352,17 @@ async function initBatchSettler(
       )
       .accounts({ payer: admin })
       .rpc()
+  );
+  const rentReservePda = findPda(
+    [Buffer.from("rent_reserve")],
+    program.programId
+  );
+  await ensureSolBalance(
+    program.provider.connection,
+    admin,
+    rentReservePda,
+    SETTLER_RENT_RESERVE_SOL,
+    "settler rent reserve"
   );
   await tryRpc("whitelistMaker(admin)", () =>
     program.methods.whitelistMaker(admin, true).accounts({ owner: admin }).rpc()

@@ -176,6 +176,15 @@ function findSettlerConfigPda(
   );
 }
 
+function findRentReservePda(
+  programId: PublicKey
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("rent_reserve")],
+    programId
+  );
+}
+
 function findMakerStatePda(
   maker: PublicKey,
   programId: PublicKey
@@ -2245,6 +2254,7 @@ describe("b1nary-options", () => {
       let vaultCounterForSettler: PublicKey;
       let vaultPda: PublicKey;
       let makerOTokenBalancePda: PublicKey;
+      let rentReservePda: PublicKey;
       let executeOrderLookupTable: anchor.web3.AddressLookupTableAccount;
 
       const [controllerConfigPda] = findControllerConfigPda(
@@ -2463,6 +2473,19 @@ describe("b1nary-options", () => {
           })
           .rpc();
 
+        [rentReservePda] = findRentReservePda(
+          batchSettlerProgram.programId
+        );
+        await provider.sendAndConfirm(
+          new Transaction().add(
+            SystemProgram.transfer({
+              fromPubkey: admin.publicKey,
+              toPubkey: rentReservePda,
+              lamports: LAMPORTS_PER_SOL,
+            })
+          )
+        );
+
         // Vault PDA (vault_id = 0 for settler PDA)
         [vaultPda] = findVaultPda(
           settlerConfigPda, new BN(0),
@@ -2486,6 +2509,7 @@ describe("b1nary-options", () => {
         );
         const commonLookupAddresses = [
           settlerConfigPda,
+          rentReservePda,
           makerStatePda,
           controllerConfigPda,
           vaultPda,
@@ -2594,6 +2618,7 @@ describe("b1nary-options", () => {
             )
             .accounts({
               settlerConfig: settlerConfigPda,
+              rentReserve: rentReservePda,
               makerState: makerStatePda,
               quoteFill: quoteFillPda,
               controllerConfig: controllerConfigPda,
@@ -2628,12 +2653,12 @@ describe("b1nary-options", () => {
         const { blockhash, lastValidBlockHeight } =
           await connection.getLatestBlockhash();
         const messageV0 = compileExecuteOrderMessage(
-          user.publicKey,
+          admin.publicKey,
           blockhash,
           [ed25519Ix, executeOrderIx]
         );
         const vtx = new VersionedTransaction(messageV0);
-        vtx.sign([user]);
+        vtx.sign([admin.payer, user]);
 
         const sig = await connection.sendRawTransaction(
           vtx.serialize()
@@ -2978,6 +3003,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             settlerConfig: settlerConfigPda,
+            rentReserve: rentReservePda,
             makerState: makerStatePda,
             quoteFill: quoteFillPda,
             controllerConfig: controllerConfigPda,
@@ -3135,6 +3161,7 @@ describe("b1nary-options", () => {
           )
           .accounts({
             settlerConfig: settlerConfigPda,
+            rentReserve: rentReservePda,
             makerState: makerStatePda,
             quoteFill: quoteFillPda,
             controllerConfig: controllerConfigPda,
@@ -3242,6 +3269,7 @@ describe("b1nary-options", () => {
             )
             .accounts({
               settlerConfig: settlerConfigPda,
+              rentReserve: rentReservePda,
               makerState: makerStatePda,
               quoteFill: quoteFillPda,
               controllerConfig: controllerConfigPda,

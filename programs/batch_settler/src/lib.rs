@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar::instructions as ixs_sysvar;
+use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
 use anchor_spl::token_interface::{
     self, BurnChecked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
@@ -11,6 +12,10 @@ declare_id!("GpR6id2cHu5fUGsFm7NUKkB4NzfuEDa6brPzkSrgAzvS");
 const MAX_FEE_BPS: u16 = 2000;
 const PRICE_SCALE: u128 = 100_000_000; // 10^8
 const MIN_ESCAPE_DELAY: i64 = 259_200; // 3 days in seconds
+const SETTLER_CONFIG_SPACE: usize = 8 + 32 + 32 + 32 + 2 + 1 + 8 + 32 + 1;
+const QUOTE_FILL_SPACE: usize = 8 + 8 + 1 + 1;
+const MAKER_OTOKEN_BALANCE_SPACE: usize = 8 + 32 + 32 + 8 + 1;
+const VAULT_MM_SPACE: usize = 8 + 32 + 32 + 32 + 8 + 1;
 
 #[program]
 pub mod batch_settler {
@@ -227,8 +232,10 @@ pub mod batch_settler {
         let clock = Clock::get()?;
         require!(clock.unix_timestamp <= deadline, SettlerError::QuoteExpired);
 
-        update_fill(&mut ctx.accounts.quote_fill, amount, max_amount)?;
-        ctx.accounts.quote_fill.bump = ctx.bumps.quote_fill;
+        let mut quote_fill = load_or_init_quote_fill(&ctx, maker_nonce, quote_id)?;
+        update_fill(&mut quote_fill, amount, max_amount)?;
+        quote_fill.bump = ctx.bumps.quote_fill;
+        write_anchor_account(&ctx.accounts.quote_fill, &quote_fill)?;
 
         let (premium, fee, net) = compute_premium_split(
             amount,
@@ -245,24 +252,38 @@ pub mod batch_settler {
         cpi_mint_otoken(&ctx, signer_seeds, amount)?;
 
         // Update MM custody ledger
-        let mm_bal = &mut ctx.accounts.maker_otoken_balance;
+        let mut mm_bal = load_or_init_maker_otoken_balance(&ctx)?;
         if mm_bal.maker == Pubkey::default() {
             mm_bal.maker = ctx.accounts.maker.key();
             mm_bal.otoken_mint = ctx.accounts.otoken_mint.key();
         }
+        require_keys_eq!(
+            mm_bal.maker,
+            ctx.accounts.maker.key(),
+            SettlerError::Unauthorized
+        );
+        require_keys_eq!(
+            mm_bal.otoken_mint,
+            ctx.accounts.otoken_mint.key(),
+            SettlerError::InvalidCustodyAccount
+        );
         mm_bal.balance = mm_bal
             .balance
             .checked_add(amount)
             .ok_or(SettlerError::MathOverflow)?;
         mm_bal.bump = ctx.bumps.maker_otoken_balance;
+        write_anchor_account(&ctx.accounts.maker_otoken_balance, &mm_bal)?;
 
         // Track vault→MM mapping for emergency ledger cleanup
-        let vault_mm = &mut ctx.accounts.vault_mm;
-        vault_mm.maker = ctx.accounts.maker.key();
-        vault_mm.vault = ctx.accounts.vault.key();
-        vault_mm.otoken_mint = ctx.accounts.otoken_mint.key();
-        vault_mm.remaining_amount = amount;
-        vault_mm.bump = ctx.bumps.vault_mm;
+        init_vault_mm_account(&ctx)?;
+        let vault_mm = VaultMM {
+            maker: ctx.accounts.maker.key(),
+            vault: ctx.accounts.vault.key(),
+            otoken_mint: ctx.accounts.otoken_mint.key(),
+            remaining_amount: amount,
+            bump: ctx.bumps.vault_mm,
+        };
+        write_anchor_account(&ctx.accounts.vault_mm, &vault_mm)?;
 
         transfer_premium(&ctx, signer_seeds, net, fee)?;
 
@@ -411,6 +432,27 @@ pub mod batch_settler {
         Ok(())
     }
 
+    /// Recover SOL held by the system-owned rent reserve PDA.
+    pub fn withdraw_rent_reserve(ctx: Context<WithdrawRentReserve>, lamports: u64) -> Result<()> {
+        require!(lamports > 0, SettlerError::ZeroAmount);
+
+        require!(
+            ctx.accounts.rent_reserve.lamports() >= lamports,
+            SettlerError::InsufficientRentReserve
+        );
+        anchor_lang::system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.rent_reserve.to_account_info(),
+                    to: ctx.accounts.recipient.to_account_info(),
+                },
+                &[&[b"rent_reserve", &[ctx.bumps.rent_reserve]]],
+            ),
+            lamports,
+        )
+    }
+
     /// Operator redeems custodied oTokens on behalf of MM after expiry.
     /// Collateral payout goes to MM's token account.
     pub fn redeem_for_mm(ctx: Context<RedeemForMM>, amount: u64) -> Result<()> {
@@ -464,7 +506,10 @@ pub mod batch_settler {
                     pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     redeemer: ctx.accounts.settler_config.to_account_info(),
                     otoken_token_program: ctx.accounts.otoken_token_program.to_account_info(),
-                    collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
+                    collateral_token_program: ctx
+                        .accounts
+                        .collateral_token_program
+                        .to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -564,7 +609,10 @@ pub mod batch_settler {
                     pool_vault_authority: ctx.accounts.pool_vault_authority.to_account_info(),
                     redeemer: ctx.accounts.settler_config.to_account_info(),
                     otoken_token_program: ctx.accounts.otoken_token_program.to_account_info(),
-                    collateral_token_program: ctx.accounts.collateral_token_program.to_account_info(),
+                    collateral_token_program: ctx
+                        .accounts
+                        .collateral_token_program
+                        .to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -895,7 +943,7 @@ pub struct Initialize<'info> {
     #[account(
         init,
         payer = payer,
-        space = 8 + 32 + 32 + 32 + 2 + 1 + 8 + 32 + 1,
+        space = SETTLER_CONFIG_SPACE,
         seeds = [b"settler_config"],
         bump,
     )]
@@ -1003,15 +1051,21 @@ pub struct ExecuteOrder<'info> {
         bump = settler_config.bump,
     )]
     pub settler_config: Account<'info, SettlerConfig>,
+    /// System-owned PDA funded by the operator/admin to sponsor ExecuteOrder rent.
+    #[account(
+        mut,
+        seeds = [b"rent_reserve"],
+        bump,
+    )]
+    pub rent_reserve: SystemAccount<'info>,
     #[account(
         seeds = [b"maker", maker.key().as_ref()],
         bump = maker_state.bump,
     )]
     pub maker_state: Account<'info, MakerState>,
+    /// CHECK: Created after quote signature validation to avoid rent-reserve griefing.
     #[account(
-        init_if_needed,
-        payer = user,
-        space = 8 + 8 + 1 + 1,
+        mut,
         seeds = [
             b"quote_fill",
             maker.key().as_ref(),
@@ -1020,7 +1074,7 @@ pub struct ExecuteOrder<'info> {
         ],
         bump,
     )]
-    pub quote_fill: Box<Account<'info, QuoteFill>>,
+    pub quote_fill: AccountInfo<'info>,
 
     /// CHECK: Validated by controller program
     pub controller_config: AccountInfo<'info>,
@@ -1069,10 +1123,9 @@ pub struct ExecuteOrder<'info> {
     pub treasury_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// MM oToken balance tracking
+    /// CHECK: Created after quote signature validation to avoid rent-reserve griefing.
     #[account(
-        init_if_needed,
-        payer = user,
-        space = 8 + 32 + 32 + 8 + 1,
+        mut,
         seeds = [
             b"mm_balance",
             maker.key().as_ref(),
@@ -1080,17 +1133,16 @@ pub struct ExecuteOrder<'info> {
         ],
         bump,
     )]
-    pub maker_otoken_balance: Box<Account<'info, MakerOTokenBalance>>,
+    pub maker_otoken_balance: AccountInfo<'info>,
 
     /// Vault-to-MM mapping for emergency ledger cleanup
+    /// CHECK: Created after quote signature validation to avoid rent-reserve griefing.
     #[account(
-        init,
-        payer = user,
-        space = 8 + 32 + 32 + 32 + 8 + 1,
+        mut,
         seeds = [b"vault_mm", vault.key().as_ref()],
         bump,
     )]
-    pub vault_mm: Box<Account<'info, VaultMM>>,
+    pub vault_mm: AccountInfo<'info>,
 
     /// User (option seller) provides collateral and receives premium
     #[account(mut)]
@@ -1228,6 +1280,28 @@ pub struct OwnerAction<'info> {
     )]
     pub settler_config: Box<Account<'info, SettlerConfig>>,
     pub owner: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawRentReserve<'info> {
+    #[account(
+        mut,
+        seeds = [b"settler_config"],
+        bump = settler_config.bump,
+        has_one = owner,
+    )]
+    pub settler_config: Box<Account<'info, SettlerConfig>>,
+    #[account(
+        mut,
+        seeds = [b"rent_reserve"],
+        bump,
+    )]
+    pub rent_reserve: SystemAccount<'info>,
+    pub owner: Signer<'info>,
+    /// CHECK: Receives SOL withdrawn from the rent reserve PDA.
+    #[account(mut)]
+    pub recipient: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -1654,11 +1728,172 @@ pub enum SettlerError {
     RedeemReturnedZero,
     #[msg("Collateral used exceeds max_collateral_spent")]
     ExcessCollateralUsed,
+    #[msg("Insufficient sponsored rent reserve")]
+    InsufficientRentReserve,
 }
 
 // ============================================================
 // Helpers
 // ============================================================
+
+fn create_program_pda<'info>(
+    rent_reserve: &AccountInfo<'info>,
+    target: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    program_id: &Pubkey,
+    space: usize,
+    target_signer_seeds: &[&[u8]],
+    rent_reserve_bump: u8,
+) -> Result<()> {
+    let lamports = Rent::get()?.minimum_balance(space);
+    let rent_reserve_bump_bytes = [rent_reserve_bump];
+
+    if target.lamports() == 0 {
+        invoke_signed(
+            &system_instruction::create_account(
+                rent_reserve.key,
+                target.key,
+                lamports,
+                space as u64,
+                program_id,
+            ),
+            &[rent_reserve.clone(), target.clone(), system_program.clone()],
+            &[
+                &[b"rent_reserve", &rent_reserve_bump_bytes],
+                target_signer_seeds,
+            ],
+        )?;
+        return Ok(());
+    }
+
+    require_keys_eq!(
+        *target.owner,
+        anchor_lang::system_program::ID,
+        SettlerError::InvalidCustodyAccount
+    );
+    require!(target.data_is_empty(), SettlerError::InvalidCustodyAccount);
+
+    let current_lamports = target.lamports();
+    if current_lamports < lamports {
+        invoke_signed(
+            &system_instruction::transfer(
+                rent_reserve.key,
+                target.key,
+                lamports - current_lamports,
+            ),
+            &[rent_reserve.clone(), target.clone(), system_program.clone()],
+            &[&[b"rent_reserve", &rent_reserve_bump_bytes]],
+        )?;
+    }
+    invoke_signed(
+        &system_instruction::allocate(target.key, space as u64),
+        &[target.clone(), system_program.clone()],
+        &[target_signer_seeds],
+    )?;
+    invoke_signed(
+        &system_instruction::assign(target.key, program_id),
+        &[target.clone(), system_program.clone()],
+        &[target_signer_seeds],
+    )?;
+    Ok(())
+}
+
+fn write_anchor_account<T: AccountSerialize>(account: &AccountInfo, value: &T) -> Result<()> {
+    let mut data = account.try_borrow_mut_data()?;
+    let mut dst: &mut [u8] = &mut data;
+    value.try_serialize(&mut dst)?;
+    Ok(())
+}
+
+fn read_anchor_account<T: AccountDeserialize>(account: &AccountInfo) -> Result<T> {
+    require_keys_eq!(*account.owner, crate::ID, SettlerError::Unauthorized);
+    let data = account.try_borrow_data()?;
+    let mut src: &[u8] = &data;
+    T::try_deserialize(&mut src).map_err(Into::into)
+}
+
+fn load_or_init_quote_fill(
+    ctx: &Context<ExecuteOrder>,
+    maker_nonce: u64,
+    quote_id: u64,
+) -> Result<QuoteFill> {
+    if ctx.accounts.quote_fill.data_is_empty() {
+        let maker_nonce_bytes = maker_nonce.to_le_bytes();
+        let quote_id_bytes = quote_id.to_le_bytes();
+        let quote_bump = [ctx.bumps.quote_fill];
+        let seeds: &[&[u8]] = &[
+            b"quote_fill",
+            ctx.accounts.maker.key.as_ref(),
+            &maker_nonce_bytes,
+            &quote_id_bytes,
+            &quote_bump,
+        ];
+        create_program_pda(
+            &ctx.accounts.rent_reserve.to_account_info(),
+            &ctx.accounts.quote_fill,
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.program_id,
+            QUOTE_FILL_SPACE,
+            seeds,
+            ctx.bumps.rent_reserve,
+        )?;
+        return Ok(QuoteFill {
+            filled_amount: 0,
+            cancelled: false,
+            bump: ctx.bumps.quote_fill,
+        });
+    }
+
+    read_anchor_account(&ctx.accounts.quote_fill)
+}
+
+fn load_or_init_maker_otoken_balance(ctx: &Context<ExecuteOrder>) -> Result<MakerOTokenBalance> {
+    if ctx.accounts.maker_otoken_balance.data_is_empty() {
+        let balance_bump = [ctx.bumps.maker_otoken_balance];
+        let otoken_mint_key = ctx.accounts.otoken_mint.key();
+        let seeds: &[&[u8]] = &[
+            b"mm_balance",
+            ctx.accounts.maker.key.as_ref(),
+            otoken_mint_key.as_ref(),
+            &balance_bump,
+        ];
+        create_program_pda(
+            &ctx.accounts.rent_reserve.to_account_info(),
+            &ctx.accounts.maker_otoken_balance,
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.program_id,
+            MAKER_OTOKEN_BALANCE_SPACE,
+            seeds,
+            ctx.bumps.rent_reserve,
+        )?;
+        return Ok(MakerOTokenBalance {
+            maker: Pubkey::default(),
+            otoken_mint: Pubkey::default(),
+            balance: 0,
+            bump: ctx.bumps.maker_otoken_balance,
+        });
+    }
+
+    read_anchor_account(&ctx.accounts.maker_otoken_balance)
+}
+
+fn init_vault_mm_account(ctx: &Context<ExecuteOrder>) -> Result<()> {
+    require!(
+        ctx.accounts.vault_mm.data_is_empty(),
+        SettlerError::InvalidCustodyAccount
+    );
+    let vault_mm_bump = [ctx.bumps.vault_mm];
+    let seeds: &[&[u8]] = &[b"vault_mm", ctx.accounts.vault.key.as_ref(), &vault_mm_bump];
+    create_program_pda(
+        &ctx.accounts.rent_reserve.to_account_info(),
+        &ctx.accounts.vault_mm,
+        &ctx.accounts.system_program.to_account_info(),
+        ctx.program_id,
+        VAULT_MM_SPACE,
+        seeds,
+        ctx.bumps.rent_reserve,
+    )
+}
 
 fn validate_maker(maker_state: &MakerState, expected_nonce: u64) -> Result<()> {
     require!(maker_state.whitelisted, SettlerError::MakerNotWhitelisted);
@@ -1782,12 +2017,13 @@ fn fund_vault_rent(ctx: &Context<ExecuteOrder>) -> Result<()> {
     let vault_space = 8 + 32 + 8 + 32 + 8 + 32 + 8 + 1 + 32 + 1;
     let lamports = rent.minimum_balance(vault_space);
     anchor_lang::system_program::transfer(
-        CpiContext::new(
+        CpiContext::new_with_signer(
             ctx.accounts.system_program.to_account_info(),
             anchor_lang::system_program::Transfer {
-                from: ctx.accounts.user.to_account_info(),
+                from: ctx.accounts.rent_reserve.to_account_info(),
                 to: ctx.accounts.vault.to_account_info(),
             },
+            &[&[b"rent_reserve", &[ctx.bumps.rent_reserve]]],
         ),
         lamports,
     )
