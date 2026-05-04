@@ -272,11 +272,30 @@ async function initOtokenFactory(
   controllerConfigPda: PublicKey
 ) {
   console.log("\n=== Initializing OTokenFactory ===");
+  const factoryConfigPda = findPda(
+    [Buffer.from("factory_config")],
+    program.programId
+  );
+  const operatorConfigPda = findPda(
+    [Buffer.from("factory_operator_config")],
+    program.programId
+  );
   await tryRpc("initialize", () =>
     program.methods.initialize(admin).accounts({ payer: admin }).rpc()
   );
   await tryRpc("setController", () =>
     program.methods.setController(controllerConfigPda).accounts({ admin }).rpc()
+  );
+  await tryRpc("setOperator", () =>
+    program.methods
+      .setOperator(admin)
+      .accounts({
+        factoryConfig: factoryConfigPda,
+        operatorConfig: operatorConfigPda,
+        admin,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc()
   );
 }
 

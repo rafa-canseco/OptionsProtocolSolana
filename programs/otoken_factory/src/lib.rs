@@ -31,6 +31,19 @@ pub mod otoken_factory {
         Ok(())
     }
 
+    pub fn set_operator(ctx: Context<SetOperator>, operator: Pubkey) -> Result<()> {
+        require!(operator != Pubkey::default(), FactoryError::ZeroAddress);
+        let config = &mut ctx.accounts.operator_config;
+        let old = config.operator;
+        config.operator = operator;
+        config.bump = ctx.bumps.operator_config;
+        emit!(OperatorUpdated {
+            old_operator: old,
+            new_operator: operator,
+        });
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_otoken(
         ctx: Context<CreateOtoken>,
@@ -41,6 +54,12 @@ pub mod otoken_factory {
         expiry: i64,
         is_put: bool,
     ) -> Result<()> {
+        let config = &ctx.accounts.factory_config;
+        let signer = ctx.accounts.admin.key();
+        require!(
+            signer == config.admin || signer == ctx.accounts.operator_config.operator,
+            FactoryError::Unauthorized
+        );
         require!(underlying != Pubkey::default(), FactoryError::ZeroAddress);
         require!(strike_asset != Pubkey::default(), FactoryError::ZeroAddress);
         require!(collateral != Pubkey::default(), FactoryError::ZeroAddress);
@@ -96,6 +115,13 @@ pub struct FactoryConfig {
     pub bump: u8,
 }
 
+/// PDA seeds: [b"factory_operator_config"]
+#[account]
+pub struct FactoryOperatorConfig {
+    pub operator: Pubkey,
+    pub bump: u8,
+}
+
 // PDA seeds: [b"otoken", underlying, strike_asset,
 //   collateral, strike_price.to_le_bytes(),
 //   expiry.to_le_bytes(), [is_put as u8]]
@@ -139,6 +165,27 @@ pub struct AdminAction<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SetOperator<'info> {
+    #[account(
+        seeds = [b"factory_config"],
+        bump = factory_config.bump,
+        has_one = admin,
+    )]
+    pub factory_config: Account<'info, FactoryConfig>,
+    #[account(
+        init_if_needed,
+        payer = admin,
+        space = 8 + 32 + 1,
+        seeds = [b"factory_operator_config"],
+        bump,
+    )]
+    pub operator_config: Account<'info, FactoryOperatorConfig>,
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 #[instruction(
     underlying: Pubkey,
     strike_asset: Pubkey,
@@ -152,12 +199,16 @@ pub struct CreateOtoken<'info> {
         mut,
         seeds = [b"factory_config"],
         bump = factory_config.bump,
-        has_one = admin,
         constraint = factory_config.controller
             != Pubkey::default()
             @ FactoryError::ControllerNotSet,
     )]
     pub factory_config: Account<'info, FactoryConfig>,
+    #[account(
+        seeds = [b"factory_operator_config"],
+        bump = operator_config.bump,
+    )]
+    pub operator_config: Account<'info, FactoryOperatorConfig>,
     #[account(
         init,
         payer = admin,
@@ -219,6 +270,12 @@ pub struct ControllerUpdated {
 }
 
 #[event]
+pub struct OperatorUpdated {
+    pub old_operator: Pubkey,
+    pub new_operator: Pubkey,
+}
+
+#[event]
 pub struct OTokenCreated {
     pub mint: Pubkey,
     pub underlying: Pubkey,
@@ -243,4 +300,6 @@ pub enum FactoryError {
     MathOverflow,
     #[msg("Expiry must be in the future")]
     InvalidExpiry,
+    #[msg("Unauthorized")]
+    Unauthorized,
 }

@@ -3062,6 +3062,7 @@ name = "whitelist"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "otoken-factory",
 ]
 
 [[package]]

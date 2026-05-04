@@ -156,6 +156,8 @@ const findWhitelistConfigPda = (pid: PublicKey) =>
   findPda([Buffer.from("whitelist_config")], pid);
 const findFactoryConfigPda = (pid: PublicKey) =>
   findPda([Buffer.from("factory_config")], pid);
+const findFactoryOperatorConfigPda = (pid: PublicKey) =>
+  findPda([Buffer.from("factory_operator_config")], pid);
 const findOTokenInfoPda = (mint: PublicKey, pid: PublicKey) =>
   findPda([Buffer.from("otoken_info"), mint.toBuffer()], pid);
 const findFactoryOTokenPda = (
@@ -446,6 +448,16 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     .accounts({ admin: admin.publicKey })
     .signers([admin])
     .rpc();
+  await otokenFactoryProgram.methods
+    .setOperator(admin.publicKey)
+    .accounts({
+      factoryConfig: factoryConfigPda,
+      operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
+      admin: admin.publicKey,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([admin])
+    .rpc();
 
   const factoryOtokenPda = findFactoryOTokenPda(
     underlyingMint,
@@ -477,6 +489,7 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     )
     .accounts({
       factoryConfig: factoryConfigPda,
+      operatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
       otoken: factoryOtokenPda,
       otokenMint,
       controllerAuthority: controllerConfigPda,
@@ -499,6 +512,9 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
     .accounts({
       whitelistedOtoken: wlOtokenPda,
       config: whitelistConfigPda,
+      factoryOtoken: factoryOtokenPda,
+      factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
+      factoryProgram: otokenFactoryProgram.programId,
       caller: admin.publicKey,
       systemProgram: SystemProgram.programId,
     })
@@ -525,6 +541,7 @@ async function buildFixture(opts: FixtureOpts): Promise<Scenario> {
       whitelistedOtoken: wlOtokenPda,
       whitelistProgram: whitelistProgram.programId,
       factoryProgram: otokenFactoryProgram.programId,
+      factoryOperatorConfig: findFactoryOperatorConfigPda(otokenFactoryProgram.programId),
       admin: admin.publicKey,
       systemProgram: SystemProgram.programId,
     })
