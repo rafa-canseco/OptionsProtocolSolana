@@ -60,34 +60,6 @@ The Solana programs are deployed on mainnet-beta and configured for the Solana e
 | WSOL | [`So11111111111111111111111111111111111111112`](https://explorer.solana.com/address/So11111111111111111111111111111111111111112) | Underlying or collateral asset for SOL products. |
 | TSLAx | [`XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB`](https://explorer.solana.com/address/XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB) | Tokenized equity underlying used in current setup scripts. |
 
-## Deployment flow
-
-The mainnet setup script is [`scripts/setup-mainnet.ts`](scripts/setup-mainnet.ts). It is guarded by `MAINNET_CONFIRM=I_UNDERSTAND_MAINNET`, expects a Ledger/admin wallet for protocol configuration, and can be re-run idempotently when `MAINNET_SEED_NONCE` is reused.
-
-High-level flow:
-
-1. Build and deploy Anchor programs.
-2. Initialize program configs with admin, operator, treasury, Pyth receiver, Jupiter, fee settings, confidence limits, and escape delay.
-3. Create collateral vault token accounts for supported assets.
-4. Register Pyth feeds for supported underlyings.
-5. Create option series through the oToken factory.
-6. Whitelist approved oTokens.
-7. Configure market-maker wallet, premium accounts, quote nonce state, and delegation.
-8. Run smoke tests and operational checks before enabling production fills.
-
-Example:
-
-```bash
-MAINNET_CONFIRM=I_UNDERSTAND_MAINNET \
-MAINNET_SEED_NONCE=<secret-reused-on-reruns> \
-ANCHOR_PROVIDER_URL=https://api.mainnet-beta.solana.com \
-ANCHOR_WALLET='usb://ledger?key=0/0' \
-OPERATOR_PUBKEY=<operator-hot-wallet> \
-TREASURY_PUBKEY=<treasury-wallet> \
-MM_PUBKEY=<market-maker-wallet> \
-npx ts-node scripts/setup-mainnet.ts
-```
-
 ## Product metrics: first 5 weeks
 
 | Metric | First 5 weeks |
@@ -123,6 +95,34 @@ Additional proof:
 - Add 10 more supported assets.
 - Idle yield switch: route unused collateral into Kamino on Solana and Aave on Base while waiting for expiry.
 - Vault curator branch for managed vault deployment and curation.
+
+## Deployment flow
+
+The mainnet setup script is [`scripts/setup-mainnet.ts`](scripts/setup-mainnet.ts). It is guarded by `MAINNET_CONFIRM=I_UNDERSTAND_MAINNET`, expects a Ledger/admin wallet for protocol configuration, and can be re-run idempotently when `MAINNET_SEED_NONCE` is reused.
+
+High-level flow:
+
+1. Build and deploy Anchor programs.
+2. Initialize program configs with admin, operator, treasury, Pyth receiver, Jupiter, fee settings, confidence limits, and escape delay.
+3. Create collateral vault token accounts for supported assets.
+4. Register Pyth feeds for supported underlyings.
+5. Create option series through the oToken factory.
+6. Whitelist approved oTokens.
+7. Configure market-maker wallet, premium accounts, quote nonce state, and delegation.
+8. Run smoke tests and operational checks before enabling production fills.
+
+Example:
+
+```bash
+MAINNET_CONFIRM=I_UNDERSTAND_MAINNET \
+MAINNET_SEED_NONCE=<secret-reused-on-reruns> \
+ANCHOR_PROVIDER_URL=https://api.mainnet-beta.solana.com \
+ANCHOR_WALLET='usb://ledger?key=0/0' \
+OPERATOR_PUBKEY=<operator-hot-wallet> \
+TREASURY_PUBKEY=<treasury-wallet> \
+MM_PUBKEY=<market-maker-wallet> \
+npx ts-node scripts/setup-mainnet.ts
+```
 
 ## Development
 
